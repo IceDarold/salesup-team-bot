@@ -1,6 +1,0 @@
-diarizer:
-  vad:
-    parameters:
-      overlap: 0.0
-      smoothing: false
-      filter_speech_first: false

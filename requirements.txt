@@ -1,10 +1,6 @@
-python-telegram-bot>=21.5
-yt-dlp>=2024.8.6
-openai-whisper>=20240930
-tiktoken>=0.7.0
-gputil>=1.4.0
-ffmpeg-python>=0.2.0
-pydub>=0.25.1
-spectralcluster>=0.2.21
-resemblyzer>=0.1.4
-scikit-learn>=1.5.2
+python-telegram-bot[job-queue]>=22.0
+httpx>=0.28.0
+google-api-python-client>=2.0.0
+google-auth>=2.0.0
+google-auth-oauthlib>=1.2.0
+openai>=1.0
