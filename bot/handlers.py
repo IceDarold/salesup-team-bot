@@ -22,7 +22,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes, ConversationHandler
 
 from bot.access import get_notion_member
-from notion_store import get_scheduled_interviews_for_member, list_team_members
+from notion_store import get_contact_stats, get_scheduled_interviews_for_member, list_team_members
 from transcriber import TRANSCRIBE_MODEL, transcribe
 
 logger = logging.getLogger(__name__)
@@ -120,6 +120,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "Команды:\n"
         "/new - новое интервью\n"
         "/transcript - просто транскрипт в новый Google Doc\n"
+        "/stats - статистика по контактам\n"
         "/info - статус бота\n"
         "/help - помощь\n"
         "/summary_chat - текущая группа summary\n"
@@ -133,6 +134,7 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "<b>Aich team bot</b>\n\n"
         "1. /new - начать новое интервью\n"
         "1a. /transcript - просто сделать транскрипт и получить ссылку на новый Google Doc\n"
+        "1b. /stats - личная статистика; в группе — общая статистика команды\n"
         "2. Заполнить короткую анкету\n"
         "3. Отправить voice, audio, video, файл с аудио/видео или прямую ссылку\n"
         "4. Бот пришлёт ссылку на инсайты в Telegra.ph\n"
@@ -159,6 +161,44 @@ async def info(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         f"Uptime: <code>{str(uptime).split('.')[0]}</code>",
         parse_mode="HTML",
     )
+
+
+async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show a personal funnel in private chats and the team funnel in groups."""
+    chat = update.effective_chat
+    is_group = bool(chat and chat.type != "private")
+    member = None if is_group else await get_notion_member(update.effective_user, context)
+
+    try:
+        data = await asyncio.to_thread(get_contact_stats, None if is_group else member["id"])
+    except Exception:
+        logger.exception("Unable to load contact statistics")
+        await update.effective_message.reply_text(
+            "Не удалось получить статистику из Notion. Попробуй ещё раз чуть позже."
+        )
+        return
+
+    title = "Команда SalesUp" if is_group else (member or {}).get("name") or "твоя статистика"
+    today = data["today"]
+    overall = data["all"]
+    today_statuses = today["statuses"]
+    lines = [
+        f"<b>📊 {html.escape(title)} — {data['date'].strftime('%d.%m')}</b>",
+        "",
+        "<b>Сегодня</b>",
+        f"• Касаний: <b>{today['total']}</b>",
+        f"• Написали: {today_statuses['Написали']} · Ответили: {today_statuses['Ответил']}",
+        f"• Согласились: {today_statuses['Согласился на интервью']} · Интервью: {today_statuses['Интервью']}",
+        f"• Отказы / без ответа: {today_statuses['Отказ']} / {today_statuses['No response']}",
+        "",
+        "<b>Всего</b>",
+        f"• Контактов: <b>{overall['total']}</b>",
+        f"• Согласились: {overall['agreed']} · Интервью+: {overall['interviews']}",
+        f"• Конверсия в согласие: {overall['agreement_conversion']}%",
+        f"• Конверсия в интервью: {overall['interview_conversion']}%",
+        f"• Доходимость: {overall['attendance']}%",
+    ]
+    await update.effective_message.reply_text("\n".join(lines), parse_mode="HTML")
 
 
 async def add_member_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

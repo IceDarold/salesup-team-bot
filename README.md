@@ -27,6 +27,18 @@ cp .env.example .env
 
 Fill `.env` with Telegram, Deepgram, LLM, Google Docs, and Notion credentials.
 
+For `/stats`, add the `Contacts` database ID from the SalesUp workspace:
+
+```bash
+NOTION_CONTACTS_DB_ID=...
+# Optional. Defaults to Asia/Nicosia.
+STATS_TIMEZONE=Asia/Nicosia
+```
+
+`/stats` uses `Последнее касание` to determine activity for the current day. In a
+private chat it shows the calling team member's statistics; in a group it shows
+the combined team statistics.
+
 Install `ffmpeg` on the machine that runs the bot if you want to process video uploads:
 
 ```bash

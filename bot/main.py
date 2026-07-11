@@ -92,6 +92,7 @@ from bot.handlers import (  # noqa: E402
     remember_group,
     set_summary_chat,
     start,
+    stats,
     summary_chat_status,
     choose_summary_chat,
 )
@@ -114,6 +115,7 @@ COMMANDS = [
     BotCommand("start", "Открыть бота"),
     BotCommand("new", "Новое интервью"),
     BotCommand("transcript", "Только транскрипт в новый Google Doc"),
+    BotCommand("stats", "Статистика по контактам"),
     BotCommand("help", "Помощь"),
     BotCommand("info", "Статус"),
     BotCommand("cancel", "Отменить интервью"),
@@ -250,6 +252,7 @@ def main() -> None:
     app.add_handler(CommandHandler("start", member_required(start)))
     app.add_handler(CommandHandler(["help", "about"], member_required(help_cmd)))
     app.add_handler(CommandHandler("info", member_required(info)))
+    app.add_handler(CommandHandler("stats", member_required(stats)))
     app.add_handler(CommandHandler("add_member", admin_required(add_member_cmd)))
     app.add_handler(CommandHandler("members", admin_required(members_cmd)))
     app.add_handler(CommandHandler("remove_member", admin_required(remove_member_cmd)))

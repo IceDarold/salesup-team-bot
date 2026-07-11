@@ -7,7 +7,8 @@ import os
 import time
 import urllib.error
 import urllib.request
-from datetime import date
+from datetime import date, datetime
+from zoneinfo import ZoneInfo
 
 logger = logging.getLogger(__name__)
 
@@ -17,6 +18,22 @@ SCHEDULED_STATUS = "Sheduled"
 INTERVIEWER_FEEDBACK_PROPERTY = "Interviewer feedback"
 NOTION_MAX_RETRIES = int(os.getenv("NOTION_MAX_RETRIES", "3"))
 NOTION_RETRY_BACKOFF_SECONDS = float(os.getenv("NOTION_RETRY_BACKOFF_SECONDS", "1.5"))
+STATS_TIMEZONE = os.getenv("STATS_TIMEZONE", "Asia/Nicosia")
+
+CONTACT_STATUS_ORDER = (
+    "Новый",
+    "Написали",
+    "Ответил",
+    "Согласился на интервью",
+    "Интервью",
+    "Показ",
+    "Пилот",
+    "Клиент",
+    "Отказ",
+    "No response",
+)
+AGREED_STATUSES = {"Согласился на интервью", "Интервью", "Показ", "Пилот", "Клиент"}
+INTERVIEW_STATUSES = {"Интервью", "Показ", "Пилот", "Клиент"}
 
 DEDUPE_TABLES = {
     "jtbd": {
@@ -107,6 +124,38 @@ def list_team_members() -> list[dict]:
         return []
     response = client.query_database(db_id, {"page_size": 100})
     return [_team_member_from_page(page) for page in response.get("results", [])]
+
+
+def get_contact_stats(member_page_id: str | None = None) -> dict:
+    """Return current and today contact funnel statistics.
+
+    Today's activity is defined by the Contacts ``Последнее касание`` field.
+    When ``member_page_id`` is omitted, the result covers the whole team.
+    """
+    db_id = os.getenv("NOTION_CONTACTS_DB_ID")
+    if not db_id:
+        raise RuntimeError("NOTION_CONTACTS_DB_ID environment variable is not set.")
+
+    payload: dict = {"page_size": 100}
+    if member_page_id:
+        payload["filter"] = {
+            "property": "Owner",
+            "relation": {"contains": member_page_id},
+        }
+
+    response = _NotionClient().query_database_all(db_id, payload)
+    contacts = [_contact_from_page(page) for page in response.get("results", [])]
+    try:
+        today = datetime.now(ZoneInfo(STATS_TIMEZONE)).date()
+    except Exception:
+        logger.warning("Invalid STATS_TIMEZONE=%r; falling back to local date", STATS_TIMEZONE)
+        today = date.today()
+
+    return {
+        "date": today,
+        "today": _contact_funnel(contact for contact in contacts if _is_on_date(contact["last_touch"], today)),
+        "all": _contact_funnel(contacts),
+    }
 
 
 def get_scheduled_interviews_for_member(member_page_id: str) -> list[dict]:
@@ -688,6 +737,49 @@ def _team_member_from_page(page: dict) -> dict:
         "telegram_username": _prop_text(props.get("Telegram username")),
         "telegram_user_id": _prop_text(props.get("Telegram user_id")),
     }
+
+
+def _contact_from_page(page: dict) -> dict:
+    props = page.get("properties", {})
+    return {
+        "status": _prop_status(props.get("Status")),
+        "last_touch": _prop_date(props.get("Последнее касание")),
+    }
+
+
+def _is_on_date(value: str, expected: date) -> bool:
+    if not value:
+        return False
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).date() == expected
+    except ValueError:
+        return False
+
+
+def _contact_funnel(contacts) -> dict:
+    counts = {status: 0 for status in CONTACT_STATUS_ORDER}
+    total = 0
+    for contact in contacts:
+        total += 1
+        status = contact.get("status") or ""
+        if status in counts:
+            counts[status] += 1
+
+    agreed = sum(counts[status] for status in AGREED_STATUSES)
+    interviews = sum(counts[status] for status in INTERVIEW_STATUSES)
+    return {
+        "total": total,
+        "statuses": counts,
+        "agreed": agreed,
+        "interviews": interviews,
+        "agreement_conversion": _percent(agreed, total),
+        "interview_conversion": _percent(interviews, total),
+        "attendance": _percent(interviews, agreed),
+    }
+
+
+def _percent(numerator: int, denominator: int) -> int:
+    return round(numerator / denominator * 100) if denominator else 0
 
 
 def _interview_from_page(page: dict) -> dict:

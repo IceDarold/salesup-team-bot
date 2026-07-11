@@ -1,0 +1,37 @@
+name: Deploy bot
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Configure SSH key
+        uses: webfactory/ssh-agent@v0.9.1
+        with:
+          ssh-private-key: ${{ secrets.DEPLOY_SSH_KEY }}
+
+      - name: Deploy to server
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/known_hosts
+          ssh "$DEPLOY_USER@$DEPLOY_HOST" <<'EOF'
+            set -eu
+            cd /opt/salesup-team-bot
+            git pull --ff-only origin main
+            venv/bin/python3 -m pip install -r requirements.txt
+            venv/bin/python3 -m py_compile bot/main.py bot/handlers.py notion_store.py
+            systemctl restart salesup-team-bot.service
+            systemctl is-active --quiet salesup-team-bot.service
+          EOF
