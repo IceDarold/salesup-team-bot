@@ -22,7 +22,13 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes, ConversationHandler
 
 from bot.access import get_notion_member
-from notion_store import get_contact_stats, get_scheduled_interviews_for_member, list_team_members
+from notion_store import (
+    create_contact,
+    get_contact_form_options,
+    get_contact_stats,
+    get_scheduled_interviews_for_member,
+    list_team_members,
+)
 from transcriber import TRANSCRIBE_MODEL, transcribe
 
 logger = logging.getLogger(__name__)
@@ -59,6 +65,15 @@ SETTINGS_PATH = Path(os.getenv("BOT_SETTINGS_PATH", "data/settings.json"))
     DEDUPE_MODE_DECISION,
     DEDUPE_REVIEW_DECISION,
 ) = range(16)
+
+(
+    CONTACT_NAME,
+    CONTACT_VALUE,
+    CONTACT_SEGMENT,
+    CONTACT_CUSTOM_SEGMENT,
+    CONTACT_SOURCE,
+    CONTACT_CUSTOM_SOURCE,
+) = range(100, 106)
 
 SEGMENT_KB = InlineKeyboardMarkup(
     [
@@ -119,6 +134,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "и сохраняю транскрипт в Google Doc.\n\n"
         "Команды:\n"
         "/new - новое интервью\n"
+        "/add_contact - добавить контакт\n"
         "/transcript - просто транскрипт в новый Google Doc\n"
         "/stats - статистика по контактам\n"
         "/info - статус бота\n"
@@ -133,8 +149,9 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
         "<b>SalesUp team bot</b>\n\n"
         "1. /new - начать новое интервью\n"
-        "1a. /transcript - просто сделать транскрипт и получить ссылку на новый Google Doc\n"
-        "1b. /stats - личная статистика; в группе — общая статистика команды\n"
+        "1a. /add_contact - добавить новый контакт в Notion\n"
+        "1b. /transcript - просто сделать транскрипт и получить ссылку на новый Google Doc\n"
+        "1c. /stats - личная статистика; в группе — общая статистика команды\n"
         "2. Заполнить короткую анкету\n"
         "3. Отправить voice, audio, video, файл с аудио/видео или прямую ссылку\n"
         "4. Бот пришлёт ссылку на инсайты в Telegra.ph\n"
@@ -199,6 +216,142 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         f"• Доходимость: {overall['attendance']}%",
     ]
     await update.effective_message.reply_text("\n".join(lines), parse_mode="HTML")
+
+
+async def add_contact(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    member = await get_notion_member(update.effective_user, context, force=True)
+    if not member:
+        await update.effective_message.reply_text("Не нашёл тебя в базе Team Members.")
+        return ConversationHandler.END
+
+    context.user_data.pop("new_contact", None)
+    context.user_data["new_contact"] = {"owner_id": member["id"]}
+    await update.effective_message.reply_text("Как зовут человека или компанию?")
+    return CONTACT_NAME
+
+
+async def contact_name(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    name = (update.effective_message.text or "").strip()
+    if not name:
+        await update.effective_message.reply_text("Напиши имя или название контакта.")
+        return CONTACT_NAME
+    context.user_data["new_contact"]["name"] = name
+    await update.effective_message.reply_text("Укажи контакт: телефон, @username, email или ссылку.")
+    return CONTACT_VALUE
+
+
+async def contact_value(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    contact = (update.effective_message.text or "").strip()
+    if not contact:
+        await update.effective_message.reply_text("Укажи способ связи с человеком.")
+        return CONTACT_VALUE
+    context.user_data["new_contact"]["contact"] = contact
+    return await _ask_contact_segment(update.effective_message, context)
+
+
+async def contact_segment(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    value = query.data.split(":", 1)[1]
+    if value == "new":
+        await query.message.reply_text("Напиши новый сегмент.")
+        return CONTACT_CUSTOM_SEGMENT
+
+    segments = context.user_data.get("contact_segments") or []
+    if not value.isdigit() or int(value) >= len(segments):
+        await query.message.reply_text("Выбери сегмент кнопкой ниже.")
+        return CONTACT_SEGMENT
+    context.user_data["new_contact"]["segment"] = segments[int(value)]
+    return await _ask_contact_source(query.message, context)
+
+
+async def contact_custom_segment(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    segment = (update.effective_message.text or "").strip()
+    if not segment:
+        await update.effective_message.reply_text("Напиши название нового сегмента.")
+        return CONTACT_CUSTOM_SEGMENT
+    context.user_data["new_contact"]["segment"] = segment
+    return await _ask_contact_source(update.effective_message, context)
+
+
+async def contact_source(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    value = query.data.split(":", 1)[1]
+    if value == "new":
+        await query.message.reply_text("Напиши новый источник.")
+        return CONTACT_CUSTOM_SOURCE
+
+    sources = context.user_data.get("contact_sources") or []
+    if not value.isdigit() or int(value) >= len(sources):
+        await query.message.reply_text("Выбери источник кнопкой ниже.")
+        return CONTACT_SOURCE
+    context.user_data["new_contact"]["source"] = sources[int(value)]
+    return await _save_contact(query.message, context)
+
+
+async def contact_custom_source(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    source = (update.effective_message.text or "").strip()
+    if not source:
+        await update.effective_message.reply_text("Напиши название нового источника.")
+        return CONTACT_CUSTOM_SOURCE
+    context.user_data["new_contact"]["source"] = source
+    return await _save_contact(update.effective_message, context)
+
+
+async def cancel_contact(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    context.user_data.pop("new_contact", None)
+    context.user_data.pop("contact_segments", None)
+    context.user_data.pop("contact_sources", None)
+    await update.effective_message.reply_text("Добавление контакта отменено.")
+    return ConversationHandler.END
+
+
+async def _ask_contact_segment(message, context: ContextTypes.DEFAULT_TYPE) -> int:
+    try:
+        options = await asyncio.to_thread(get_contact_form_options)
+    except Exception:
+        logger.exception("Unable to load Contact segments")
+        await message.reply_text("Не удалось загрузить сегменты из Notion. Попробуй ещё раз позже.")
+        return ConversationHandler.END
+    context.user_data["contact_segments"] = options["segments"]
+    buttons = [[InlineKeyboardButton(item, callback_data=f"contact_segment:{index}")] for index, item in enumerate(options["segments"])]
+    buttons.append([InlineKeyboardButton("➕ Новый сегмент", callback_data="contact_segment:new")])
+    await message.reply_text("Выбери сегмент:", reply_markup=InlineKeyboardMarkup(buttons))
+    return CONTACT_SEGMENT
+
+
+async def _ask_contact_source(message, context: ContextTypes.DEFAULT_TYPE) -> int:
+    try:
+        options = await asyncio.to_thread(get_contact_form_options)
+    except Exception:
+        logger.exception("Unable to load Contact sources")
+        await message.reply_text("Не удалось загрузить источники из Notion. Попробуй ещё раз позже.")
+        return ConversationHandler.END
+    context.user_data["contact_sources"] = options["sources"]
+    buttons = [[InlineKeyboardButton(item, callback_data=f"contact_source:{index}")] for index, item in enumerate(options["sources"])]
+    buttons.append([InlineKeyboardButton("➕ Новый источник", callback_data="contact_source:new")])
+    await message.reply_text("Выбери источник:", reply_markup=InlineKeyboardMarkup(buttons))
+    return CONTACT_SOURCE
+
+
+async def _save_contact(message, context: ContextTypes.DEFAULT_TYPE) -> int:
+    payload = context.user_data.get("new_contact") or {}
+    try:
+        url = await asyncio.to_thread(create_contact, **payload)
+    except Exception:
+        logger.exception("Unable to create Contact in Notion")
+        await message.reply_text("Не удалось добавить контакт в Notion. Попробуй ещё раз позже.")
+        return ConversationHandler.END
+
+    context.user_data.pop("new_contact", None)
+    context.user_data.pop("contact_segments", None)
+    context.user_data.pop("contact_sources", None)
+    reply = "Готово — контакт добавлен в Notion со статусом «Новый»."
+    if url:
+        reply += f"\n{url}"
+    await message.reply_text(reply)
+    return ConversationHandler.END
 
 
 async def add_member_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

@@ -158,6 +158,40 @@ def get_contact_stats(member_page_id: str | None = None) -> dict:
     }
 
 
+def get_contact_form_options() -> dict[str, list[str]]:
+    """Return the currently configured segments and sources from Contacts."""
+    db_id = _contacts_db_id()
+    database = _NotionClient().retrieve_database(db_id)
+    props = database.get("properties", {})
+    segments = [item.get("name", "") for item in (props.get("Segment", {}).get("multi_select", {}).get("options", []))]
+    sources = [item.get("name", "") for item in (props.get("Источник", {}).get("select", {}).get("options", []))]
+    return {
+        "segments": [item for item in segments if item],
+        "sources": [item for item in sources if item],
+    }
+
+
+def create_contact(*, owner_id: str, name: str, contact: str, segment: str, source: str) -> str:
+    """Create a new Contacts page assigned to the team member who added it."""
+    properties = {
+        "Name": _title(name),
+        "Контакт": _rich_text(contact),
+        "Owner": _relation(owner_id),
+        "Status": {"status": {"name": "Новый"}},
+        "Segment": {"multi_select": [{"name": segment}]},
+        "Источник": {"select": {"name": source}},
+    }
+    response = _NotionClient().create_page(_contacts_db_id(), properties)
+    return response.get("url") or ""
+
+
+def _contacts_db_id() -> str:
+    db_id = os.getenv("NOTION_CONTACTS_DB_ID")
+    if not db_id:
+        raise RuntimeError("NOTION_CONTACTS_DB_ID environment variable is not set.")
+    return db_id
+
+
 def get_scheduled_interviews_for_member(member_page_id: str) -> list[dict]:
     client = _NotionClient()
     db_id = os.getenv("NOTION_INTERVIEWS_DB_ID")
@@ -665,6 +699,9 @@ class _NotionClient:
 
     def retrieve_page(self, page_id: str) -> dict:
         return self._request("GET", f"/pages/{page_id}")
+
+    def retrieve_database(self, database_id: str) -> dict:
+        return self._request("GET", f"/databases/{database_id}")
 
     def query_database(self, database_id: str, body: dict) -> dict:
         return self._request("POST", f"/databases/{database_id}/query", body)

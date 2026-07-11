@@ -41,6 +41,12 @@ from bot.handlers import (  # noqa: E402
     ARTIFACT_DECISION,
     ARCHIVE_DECISION,
     CUSTOM_PARTS_COUNT,
+    CONTACT_CUSTOM_SEGMENT,
+    CONTACT_CUSTOM_SOURCE,
+    CONTACT_NAME,
+    CONTACT_SEGMENT,
+    CONTACT_SOURCE,
+    CONTACT_VALUE,
     DEDUPE_MODE_DECISION,
     DEDUPE_REVIEW_DECISION,
     EXPERIENCE,
@@ -55,11 +61,19 @@ from bot.handlers import (  # noqa: E402
     SEGMENT,
     SUBJECT,
     add_member_cmd,
+    add_contact,
     archive_decision,
     archive_decision_text,
     artifact_decision,
     artifact_decision_text,
     cancel_interview,
+    cancel_contact,
+    contact_custom_segment,
+    contact_custom_source,
+    contact_name,
+    contact_segment,
+    contact_source,
+    contact_value,
     dedupe_mode_decision,
     dedupe_mode_text,
     dedupe_review_decision,
@@ -114,6 +128,7 @@ PERSISTENCE_PATH = Path(os.getenv("BOT_PERSISTENCE_PATH", "data/bot-state.pickle
 COMMANDS = [
     BotCommand("start", "Открыть бота"),
     BotCommand("new", "Новое интервью"),
+    BotCommand("add_contact", "Добавить контакт"),
     BotCommand("transcript", "Только транскрипт в новый Google Doc"),
     BotCommand("stats", "Статистика по контактам"),
     BotCommand("help", "Помощь"),
@@ -245,6 +260,26 @@ def main() -> None:
                 CommandHandler("cancel", member_required(cancel_interview)),
             ],
             name="interview_flow",
+            persistent=True,
+        )
+    )
+    app.add_handler(
+        ConversationHandler(
+            entry_points=[CommandHandler("add_contact", member_required(add_contact))],
+            states={
+                CONTACT_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, member_required(contact_name))],
+                CONTACT_VALUE: [MessageHandler(filters.TEXT & ~filters.COMMAND, member_required(contact_value))],
+                CONTACT_SEGMENT: [CallbackQueryHandler(member_required(contact_segment), pattern=r"^contact_segment:")],
+                CONTACT_CUSTOM_SEGMENT: [
+                    MessageHandler(filters.TEXT & ~filters.COMMAND, member_required(contact_custom_segment))
+                ],
+                CONTACT_SOURCE: [CallbackQueryHandler(member_required(contact_source), pattern=r"^contact_source:")],
+                CONTACT_CUSTOM_SOURCE: [
+                    MessageHandler(filters.TEXT & ~filters.COMMAND, member_required(contact_custom_source))
+                ],
+            },
+            fallbacks=[CommandHandler("cancel", member_required(cancel_contact))],
+            name="contact_flow",
             persistent=True,
         )
     )

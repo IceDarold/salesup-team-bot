@@ -16,6 +16,13 @@ Telegram bot for the SalesUp team's interviews, contacts, and candidates.
 - Structured insights are saved into separate Notion databases.
 - If a summary group is configured, the bot posts a short summary and report link there after successful report generation.
 
+## Contacts
+
+Use `/add_contact` to add a person to the `Contacts` database. The bot asks for
+the name and contact, offers the current Notion segments and sources as inline
+buttons, and lets the user add a new value when needed. New contacts are assigned
+to the person who added them and start with the `Новый` status.
+
 ## Setup
 
 ```bash
