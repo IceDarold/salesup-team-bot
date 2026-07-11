@@ -326,7 +326,7 @@ def _create_interview(
     comment = _join_parts(
         [
             _text(interview.get("summary")),
-            f"Aich value fit: {_text(interview.get('aich_value_fit'))}",
+            f"SalesUp value fit: {_text(interview.get('aich_value_fit'))}",
             f"ICP fit: {_text(interview.get('icp_fit'))}",
             f"Report: {report_url}" if report_url else "",
         ]

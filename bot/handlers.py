@@ -113,8 +113,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     member = await get_notion_member(update.effective_user, context)
     display_name = (member or {}).get("name") or update.effective_user.first_name or "привет"
     await update.message.reply_text(
-        f"<b>Привет, {display_name}. Я бот-помощник команды Aich.</b>\n\n"
-        "Сейчас я помогаю обрабатывать custdev-интервью: принимаю аудио или видео, "
+        f"<b>Привет, {display_name}. Я бот-помощник команды SalesUp.</b>\n\n"
+        "Помогаю работать с интервью, контактами и кандидатами: принимаю аудио или видео, "
         "делаю транскрипт, извлекаю инсайты через LLM, публикую фидбэк в Telegra.ph "
         "и сохраняю транскрипт в Google Doc.\n\n"
         "Команды:\n"
@@ -131,7 +131,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
-        "<b>Aich team bot</b>\n\n"
+        "<b>SalesUp team bot</b>\n\n"
         "1. /new - начать новое интервью\n"
         "1a. /transcript - просто сделать транскрипт и получить ссылку на новый Google Doc\n"
         "1b. /stats - личная статистика; в группе — общая статистика команды\n"
@@ -214,7 +214,7 @@ async def members_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await update.message.reply_text("В базе пока нет участников.")
         return
 
-    lines = ["<b>Участники Aich bot</b>"]
+    lines = ["<b>Участники SalesUp bot</b>"]
     for member in members:
         username = member.get("telegram_username") or "-"
         user_id = member.get("telegram_user_id") or "-"
@@ -1664,7 +1664,7 @@ async def _send_group_summary(
 
     lines.extend(
         [
-            f"Aich value fit: <code>{html.escape(fit)}</code>",
+            f"SalesUp value fit: <code>{html.escape(fit)}</code>",
             f"ICP fit: <code>{html.escape(icp_fit)}</code>",
             "",
             f"Подробный разбор: {_html_link('Telegra.ph', report_url)}",
@@ -1812,7 +1812,7 @@ async def _send_summary_chat_welcome(context: ContextTypes.DEFAULT_TYPE, chat_id
         await context.bot.send_message(
             chat_id=chat_id,
             text=(
-                "Эта группа настроена для summary встреч Aich.\n\n"
+                "Эта группа настроена для summary встреч SalesUp.\n\n"
                 "После каждого проанализированного интервью я буду присылать сюда короткое summary "
                 "и ссылку на подробный разбор."
             ),

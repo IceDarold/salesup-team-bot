@@ -1,6 +1,6 @@
-# Aich Interview Bot
+# SalesUp Team Bot
 
-Telegram bot for Aich custdev interview processing.
+Telegram bot for the SalesUp team's interviews, contacts, and candidates.
 
 ## Workflow
 

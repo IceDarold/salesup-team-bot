@@ -41,7 +41,7 @@ def admin_required(handler: Handler[T]) -> Handler[T | None]:
     async def wrapped(update: Update, context: ContextTypes.DEFAULT_TYPE) -> T | None:
         user = update.effective_user
         if not is_admin(user):
-            await _reply(update, "Команда доступна только админам Aich.")
+            await _reply(update, "Команда доступна только админам SalesUp.")
             return None
 
         return await handler(update, context)
@@ -100,7 +100,7 @@ async def deny_access(update: Update) -> None:
     await _reply(
         update,
         "Прости, у тебя нет доступа к этому боту.\n\n"
-        "Это внутренний бот команды Aich. Добавь себя в Notion базу Team Members "
+        "Это внутренний бот команды SalesUp. Добавь себя в Notion базу Team Members "
         "и заполни Telegram username / Telegram user_id.\n\n"
         f"Твой Telegram: {username}\n"
         f"Твой user_id: {user_id}",

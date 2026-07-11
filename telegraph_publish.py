@@ -14,8 +14,8 @@ logger = logging.getLogger(__name__)
 
 API_BASE = "https://api.telegra.ph"
 ENV_PATH = Path(__file__).resolve().parent / ".env"
-TELEGRAPH_AUTHOR_NAME = os.getenv("TELEGRAPH_AUTHOR_NAME", "Aich Team")
-TELEGRAPH_SHORT_NAME = os.getenv("TELEGRAPH_SHORT_NAME", "Aich")
+TELEGRAPH_AUTHOR_NAME = os.getenv("TELEGRAPH_AUTHOR_NAME", "SalesUp Team")
+TELEGRAPH_SHORT_NAME = os.getenv("TELEGRAPH_SHORT_NAME", "SalesUp")
 TELEGRAPH_ACCESS_TOKEN = os.getenv("TELEGRAPH_ACCESS_TOKEN")
 MAX_CONTENT_BYTES = 60_000
 TELEGRAPH_MAX_RETRIES = int(os.getenv("TELEGRAPH_MAX_RETRIES", "3"))
@@ -24,12 +24,12 @@ TELEGRAPH_RETRY_BACKOFF_SECONDS = float(os.getenv("TELEGRAPH_RETRY_BACKOFF_SECON
 
 def publish_insights(answers: dict, insights: str) -> str:
     """Create a Telegra.ph page with interview insights and return its URL."""
-    return _publish_page(_page_title(answers, "Инсайты Aich"), insights)
+    return _publish_page(_page_title(answers, "Инсайты SalesUp"), insights)
 
 
 def publish_interviewer_feedback(answers: dict, feedback: str) -> str:
     """Create a separate Telegra.ph page with private interviewer feedback."""
-    return _publish_page(_page_title(answers, "Фидбэк интервьюеру Aich"), feedback)
+    return _publish_page(_page_title(answers, "Фидбэк интервьюеру SalesUp"), feedback)
 
 
 def _publish_page(title: str, text: str) -> str:
