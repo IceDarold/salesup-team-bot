@@ -109,6 +109,14 @@ def _prepared_action_text(action: dict[str, Any]) -> str:
             f"Сегмент: {payload.get('segment')}\n"
             f"Источник: {payload.get('source')}"
         )
+    if action.get("kind") == "update_contact_status":
+        payload = action.get("payload") or {}
+        return (
+            "Изменить статус контакта в Notion?\n\n"
+            f"Контакт: {action.get('contact_name')}\n"
+            f"Текущий статус: {action.get('current_status')}\n"
+            f"Новый статус: {payload.get('status')}"
+        )
     return "Подтвердить подготовленное действие?"
 
 

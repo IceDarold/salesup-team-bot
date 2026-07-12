@@ -223,6 +223,32 @@ def find_contacts(
     return contacts
 
 
+def get_contact_status_options() -> list[str]:
+    """Return the statuses currently configured in the Contacts database."""
+    database = _NotionClient().retrieve_database(_contacts_db_id())
+    status_config = (database.get("properties", {}).get("Status", {}).get("status", {}))
+    options = status_config.get("options") or []
+    if not options:
+        options = [item for group in (status_config.get("groups") or {}).values() for item in group]
+    return [item.get("name", "") for item in options if item.get("name")]
+
+
+def update_contact_status(*, contact_id: str, owner_id: str, status: str) -> dict:
+    """Update one of the caller's contacts to a configured status."""
+    client = _NotionClient()
+    page = client.retrieve_page(contact_id)
+    props = page.get("properties", {})
+    if owner_id not in _prop_relation(props.get("Owner")):
+        raise PermissionError("Контакт не принадлежит текущему пользователю.")
+    options = get_contact_status_options()
+    normalized = {item.casefold(): item for item in options}
+    target_status = normalized.get(status.strip().casefold())
+    if not target_status:
+        raise ValueError(f"Статус «{status}» недоступен для Contacts.")
+    client.update_page(contact_id, {"Status": {"status": {"name": target_status}}})
+    return {"name": _prop_title(props.get("Name")), "url": page.get("url") or "", "status": target_status}
+
+
 def _contacts_db_id() -> str:
     db_id = os.getenv("NOTION_CONTACTS_DB_ID")
     if not db_id:
@@ -824,6 +850,7 @@ def _contact_from_page(page: dict) -> dict:
         "status": _prop_status(props.get("Status")),
         "segments": _prop_multi_select(props.get("Segment")),
         "source": _prop_select(props.get("Источник")),
+        "owner_ids": _prop_relation(props.get("Owner")),
         "last_touch": _prop_date(props.get("Последнее касание")),
     }
 

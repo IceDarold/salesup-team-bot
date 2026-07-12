@@ -5,7 +5,13 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
-from notion_store import create_contact, find_contacts, get_contact_stats
+from notion_store import (
+    create_contact,
+    find_contacts,
+    get_contact_stats,
+    get_contact_status_options,
+    update_contact_status,
+)
 
 
 ToolHandler = Callable[["AgentToolContext", dict[str, Any]], dict[str, Any]]
@@ -81,6 +87,9 @@ def execute_tool(tool: ToolSpec, context: AgentToolContext, arguments: dict[str,
 def execute_prepared_action(action: dict[str, Any]) -> str:
     """Run a previously confirmed write action. Never call this from the model loop."""
     if action.get("kind") != "create_contact":
+        if action.get("kind") == "update_contact_status":
+            result = update_contact_status(**(action.get("payload") or {}))
+            return result.get("url") or ""
         raise ValueError("Неизвестное подготовленное действие.")
     return create_contact(**(action.get("payload") or {}))
 
@@ -116,6 +125,33 @@ def _prepare_create_contact(context: AgentToolContext, arguments: dict[str, Any]
     action = {
         "kind": "create_contact",
         "payload": {"owner_id": context.member["id"], **required},
+        "expires_at": prepared_action_expiry(),
+    }
+    return {"ok": True, "terminal": True, "prepared_action": action}
+
+
+def _prepare_update_contact_status(context: AgentToolContext, arguments: dict[str, Any]) -> dict[str, Any]:
+    if context.is_group:
+        return {"ok": False, "error": "Менять статус через агента можно только в личном чате."}
+    contact_id = str(arguments.get("contact_id") or "").strip()
+    requested_status = str(arguments.get("status") or "").strip()
+    if not contact_id or not requested_status:
+        return {"ok": False, "error": "Нужны contact_id и новый статус."}
+    contact = next(
+        (item for item in find_contacts(member_page_id=context.owner_id, limit=50) if item.get("id") == contact_id),
+        None,
+    )
+    if not contact:
+        return {"ok": False, "error": "Контакт не найден среди твоих контактов."}
+    options = {item.casefold(): item for item in get_contact_status_options()}
+    target_status = options.get(requested_status.casefold())
+    if not target_status:
+        return {"ok": False, "error": "Такого статуса нет в базе Contacts."}
+    action = {
+        "kind": "update_contact_status",
+        "payload": {"contact_id": contact_id, "owner_id": context.member["id"], "status": target_status},
+        "contact_name": contact.get("name") or "контакт",
+        "current_status": contact.get("status") or "—",
         "expires_at": prepared_action_expiry(),
     }
     return {"ok": True, "terminal": True, "prepared_action": action}
@@ -159,6 +195,15 @@ _CREATE_CONTACT_PARAMETERS = {
     "required": ["name", "contact", "segment", "source"],
     "additionalProperties": False,
 }
+_UPDATE_CONTACT_STATUS_PARAMETERS = {
+    "type": "object",
+    "properties": {
+        "contact_id": {"type": "string", "description": "ID контакта из результата search_contacts."},
+        "status": {"type": "string", "description": "Новый статус из базы Contacts."},
+    },
+    "required": ["contact_id", "status"],
+    "additionalProperties": False,
+}
 _TOOLS = (
     ToolSpec(
         name="get_contact_stats",
@@ -195,6 +240,14 @@ _TOOLS = (
         parameters=_CREATE_CONTACT_PARAMETERS,
         progress_label="Готовлю контакт…",
         execute=_prepare_create_contact,
+        policy=ToolPolicy(toolset="contacts", risk="write", confirmation="required"),
+    ),
+    ToolSpec(
+        name="prepare_update_contact_status",
+        description="Подготовить смену статуса контакта. Сначала найди контакт через search_contacts; изменение будет применено только после подтверждения.",
+        parameters=_UPDATE_CONTACT_STATUS_PARAMETERS,
+        progress_label="Готовлю смену статуса…",
+        execute=_prepare_update_contact_status,
         policy=ToolPolicy(toolset="contacts", risk="write", confirmation="required"),
     ),
 )

@@ -308,7 +308,10 @@ async def agent_action_callback(update: Update, context: ContextTypes.DEFAULT_TY
         return
 
     context.user_data.pop(AGENT_PREPARED_ACTION_KEY, None)
-    text = "Готово — контакт добавлен в Notion со статусом «Новый»."
+    if action.get("kind") == "update_contact_status":
+        text = "Готово — статус контакта обновлён в Notion."
+    else:
+        text = "Готово — контакт добавлен в Notion со статусом «Новый»."
     if url:
         text += f"\n{url}"
     await query.edit_message_text(text)
