@@ -1,4 +1,5 @@
 """Telegram bot entry point for interview transcription."""
+import asyncio
 import logging
 import os
 import sys
@@ -41,7 +42,7 @@ load_dotenv()
 from bot.access import admin_required, init_access_db, member_required  # noqa: E402
 from bot.telegram_user import TelegramUserService  # noqa: E402
 from bot.telegram_web import TelegramTwoFactorServer  # noqa: E402
-from notion_store import get_contacts_with_next_step_on, list_team_members  # noqa: E402
+from notion_store import find_contacts, get_contacts_with_next_step_on, list_team_members  # noqa: E402
 from bot.handlers import (  # noqa: E402
     ARTIFACT_DECISION,
     ARCHIVE_DECISION,
@@ -116,6 +117,11 @@ from bot.handlers import (  # noqa: E402
     stats,
     summary_chat_status,
     telegram_account,
+    telegram_archive_callback,
+    telegram_delete,
+    telegram_delete_all,
+    telegram_export,
+    telegram_privacy,
     choose_summary_chat,
 )
 
@@ -144,6 +150,10 @@ COMMANDS = [
     BotCommand("transcript", "Только транскрипт в новый Google Doc"),
     BotCommand("stats", "Статистика по контактам"),
     BotCommand("telegram", "Подключить личный Telegram"),
+    BotCommand("telegram_privacy", "Настройки архива переписки"),
+    BotCommand("telegram_export", "Обновить архив контакта"),
+    BotCommand("telegram_delete", "Удалить архив контакта"),
+    BotCommand("telegram_delete_all", "Удалить все архивы"),
     BotCommand("help", "Помощь"),
     BotCommand("info", "Статус"),
     BotCommand("cancel", "Отменить интервью"),
@@ -303,6 +313,10 @@ def main() -> None:
     app.add_handler(CommandHandler("info", member_required(info)))
     app.add_handler(CommandHandler("stats", member_required(stats)))
     app.add_handler(CommandHandler("telegram", member_required(telegram_account)))
+    app.add_handler(CommandHandler("telegram_privacy", member_required(telegram_privacy)))
+    app.add_handler(CommandHandler("telegram_export", member_required(telegram_export)))
+    app.add_handler(CommandHandler("telegram_delete", member_required(telegram_delete)))
+    app.add_handler(CommandHandler("telegram_delete_all", member_required(telegram_delete_all)))
     app.add_handler(CommandHandler("add_member", admin_required(add_member_cmd)))
     app.add_handler(CommandHandler("members", admin_required(members_cmd)))
     app.add_handler(CommandHandler("remove_member", admin_required(remove_member_cmd)))
@@ -310,10 +324,12 @@ def main() -> None:
     app.add_handler(CommandHandler("summary_chat", admin_required(summary_chat_status)))
     app.add_handler(CallbackQueryHandler(admin_required(choose_summary_chat), pattern=r"^summary_chat:"))
     app.add_handler(CallbackQueryHandler(member_required(agent_action_callback), pattern=r"^agent_action:"))
+    app.add_handler(CallbackQueryHandler(member_required(telegram_archive_callback), pattern=r"^archive:"))
     app.add_handler(ChatMemberHandler(remember_bot_chat_member, ChatMemberHandler.MY_CHAT_MEMBER))
     app.add_handler(MessageHandler(filters.ChatType.GROUPS, remember_group), group=10)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, member_required(agent_message)))
     schedule_next_step_reminders(app)
+    schedule_conversation_archives(app)
 
     logger.info("Interview bot starting")
     app.run_polling()
@@ -339,7 +355,7 @@ async def setup_commands(app: Application) -> None:
     service = telegram_user_service or TelegramUserService()
     telegram_user_service = service
     app._telegram_user_service = service
-    server = TelegramTwoFactorServer(service)
+    server = TelegramTwoFactorServer(service, app.bot)
     telegram_two_factor_server = server
     try:
         await server.start()
@@ -367,6 +383,29 @@ def schedule_next_step_reminders(app: Application) -> None:
         logger.warning("Invalid NEXT_STEP_REMINDER_TIME=%r; using 09:00", NEXT_STEP_REMINDER_TIME)
         scheduled_time = time(hour=9, minute=0, tzinfo=ZoneInfo("Asia/Nicosia"))
     app.job_queue.run_daily(next_step_reminders_job, time=scheduled_time, name="next_step_reminders")
+
+
+def schedule_conversation_archives(app: Application) -> None:
+    interval = max(60, int(os.getenv("TELEGRAM_ARCHIVE_SYNC_SECONDS", "300")))
+    app.job_queue.run_repeating(conversation_archives_job, interval=interval, first=15, name="conversation_archives")
+
+
+async def conversation_archives_job(context) -> None:
+    service = getattr(context.application, "_telegram_user_service", None)
+    if service is None:
+        return
+    for member in await asyncio.to_thread(list_team_members):
+        try:
+            user_id = int(member.get("telegram_user_id") or "")
+        except (TypeError, ValueError):
+            continue
+        if not service.archive_status(user_id)["enabled"]:
+            continue
+        try:
+            contacts = await asyncio.to_thread(find_contacts, member_page_id=member.get("id"), limit=1000)
+            await service.sync_archive(user_id, contacts, member.get("name", ""))
+        except Exception:
+            logger.exception("Unable to synchronize Telegram archive for user %s", user_id)
 
 
 async def next_step_reminders_job(context) -> None:

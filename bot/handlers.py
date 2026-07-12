@@ -29,6 +29,7 @@ from bot.agent_tools import execute_prepared_action
 from bot.telegram_user import TelegramUserError
 from notion_store import (
     create_contact,
+    find_contacts,
     get_contact_form_options,
     get_contact_stats,
     get_scheduled_interviews_for_member,
@@ -53,6 +54,7 @@ KNOWN_SUMMARY_GROUPS_KEY = "known_summary_groups"
 SETTINGS_PATH = Path(os.getenv("BOT_SETTINGS_PATH", "data/settings.json"))
 AGENT_PREPARED_ACTION_KEY = "agent_prepared_action"
 AGENT_ACTION_PREFIX = "agent_action:"
+ARCHIVE_CALLBACK_PREFIX = "archive:"
 
 (
     NAME,
@@ -166,6 +168,11 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "1a. /add_contact - добавить новый контакт в Notion\n"
         "1b. /transcript - просто сделать транскрипт и получить ссылку на новый Google Doc\n"
         "1c. /stats - личная статистика; в группе — общая статистика команды\n"
+        "1d. /telegram - подключить личный Telegram\n"
+        "1e. /telegram_privacy - настройки архива переписки с контактами\n"
+        "1f. /telegram_export <контакт> - обновить архив и получить ссылку\n"
+        "1g. /telegram_delete <контакт> - удалить архив контакта\n"
+        "1h. /telegram_delete_all - удалить все архивы\n"
         "2. Заполнить короткую анкету\n"
         "3. Отправить voice, audio, video, файл с аудио/видео или прямую ссылку\n"
         "4. Бот пришлёт ссылку на инсайты в Telegra.ph\n"
@@ -293,7 +300,9 @@ async def telegram_account(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         return
     if status["connected"]:
         name = status["display_name"] or (f"@{status['username']}" if status["username"] else "аккаунт")
-        await update.effective_message.reply_text(f"Личный Telegram уже подключён: {name}.")
+        archive = service.archive_status(user_id)
+        state = "включено" if archive["enabled"] else "не включено"
+        await update.effective_message.reply_text(f"Личный Telegram уже подключён: {name}. Архив переписки: {state}.")
         return
     try:
         login_url = await service.begin_qr_login(user_id)
@@ -312,10 +321,10 @@ async def telegram_account(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         photo=buffer,
         caption="Открой Telegram → Настройки → Устройства → Подключить устройство и отсканируй QR-код. Жду до 90 секунд.",
     )
-    asyncio.create_task(_finish_telegram_login(service, user_id, update.effective_message))
+    asyncio.create_task(_finish_telegram_login(service, user_id, update.effective_message, context))
 
 
-async def _finish_telegram_login(service, user_id: int, message) -> None:
+async def _finish_telegram_login(service, user_id: int, message, context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
         result = await service.complete_qr_login(user_id)
     except TelegramUserError as exc:
@@ -330,6 +339,113 @@ async def _finish_telegram_login(service, user_id: int, message) -> None:
     name = result.get("display_name") or (f"@{result.get('username')}" if result.get("username") else "аккаунт")
     await message.reply_text(
         f"Готово — личный Telegram подключён: {name}. Агент сможет предложить сообщение и отправить его только после твоего подтверждения."
+    )
+    await _ask_archive_consent(message)
+
+
+async def _ask_archive_consent(message) -> None:
+    await message.reply_text(
+        "Разрешаете сохранять всю переписку с личными чатами, которые однозначно совпадают с вашими контактами в SalesUp?\n\n"
+        "Будут импортированы все доступные входящие и исходящие сообщения, а новые будут синхронизироваться автоматически. "
+        "Текст хранится в защищённой базе бота и во вкладке Google Doc контакта. Отключить и удалить архив можно командами /telegram_privacy, /telegram_delete и /telegram_delete_all.",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("✅ Разрешить полный архив", callback_data=f"{ARCHIVE_CALLBACK_PREFIX}consent:yes")],
+            [InlineKeyboardButton("Не разрешать", callback_data=f"{ARCHIVE_CALLBACK_PREFIX}consent:no")],
+        ]),
+    )
+
+
+async def telegram_privacy(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    service = _telegram_user_service(context)
+    status = service.archive_status(update.effective_user.id)
+    if status["enabled"]:
+        await update.effective_message.reply_text(
+            f"Архив включён. Сохранено сообщений: {status['messages']}; контактов: {status['contacts']}.\n"
+            "Новые сообщения синхронизируются автоматически. Чтобы отключить и удалить всё, используй /telegram_delete_all."
+        )
+    else:
+        await _ask_archive_consent(update.effective_message)
+
+
+async def telegram_archive_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+    try:
+        _, action, value = (query.data or "").split(":", 2)
+    except ValueError:
+        await query.edit_message_text("Не удалось распознать действие.")
+        return
+    service = _telegram_user_service(context)
+    user_id = update.effective_user.id
+    if action == "consent":
+        if value != "yes":
+            service.set_archive_consent(user_id, False)
+            await query.edit_message_text("Архив переписки не включён. Подключение Telegram продолжает работать.")
+            return
+        service.set_archive_consent(user_id, True)
+        await query.edit_message_text("Согласие сохранено. Импортирую всю доступную переписку с контактами в фоне; это может занять некоторое время.")
+        member = await get_notion_member(update.effective_user, context)
+        contacts = await asyncio.to_thread(find_contacts, member_page_id=(member or {}).get("id"), limit=1000)
+        asyncio.create_task(service.sync_archive(user_id, contacts, (member or {}).get("name", "")))
+        return
+    if action == "delete" and value:
+        await service.delete_contact_archive(user_id, value)
+        await query.edit_message_text("Архив переписки контакта удалён из базы и Google Doc.")
+        return
+    if action == "delete_all" and value == "yes":
+        count = await service.delete_all_archives(user_id)
+        await query.edit_message_text(f"Удалены архивы: {count}. Автосинхронизация отключена.")
+        return
+    await query.edit_message_text("Действие отменено.")
+
+
+async def telegram_export(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = " ".join(context.args).strip()
+    if not query:
+        await update.effective_message.reply_text("Использование: /telegram_export <имя или часть имени контакта>")
+        return
+    member = await get_notion_member(update.effective_user, context)
+    contacts = await asyncio.to_thread(find_contacts, member_page_id=(member or {}).get("id"), query=query, limit=2)
+    if len(contacts) != 1:
+        await update.effective_message.reply_text("Нужен один точно найденный контакт. Уточни имя.")
+        return
+    service = _telegram_user_service(context)
+    if not service.archive_status(update.effective_user.id)["enabled"]:
+        await update.effective_message.reply_text("Сначала включи архив через /telegram_privacy.")
+        return
+    await update.effective_message.reply_text("Синхронизирую и обновляю Google Doc…")
+    service.allow_contact_archive(update.effective_user.id, contacts[0]["id"])
+    await service.sync_archive(update.effective_user.id, contacts, (member or {}).get("name", ""))
+    url = await service.export_contact(update.effective_user.id, contacts[0]["id"], (member or {}).get("name", ""))
+    await update.effective_message.reply_text(url or "Для этого контакта пока не найден личный Telegram-чат.")
+
+
+async def telegram_delete(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = " ".join(context.args).strip()
+    if not query:
+        await update.effective_message.reply_text("Использование: /telegram_delete <имя или часть имени контакта>")
+        return
+    member = await get_notion_member(update.effective_user, context)
+    contacts = await asyncio.to_thread(find_contacts, member_page_id=(member or {}).get("id"), query=query, limit=2)
+    if len(contacts) != 1:
+        await update.effective_message.reply_text("Нужен один точно найденный контакт. Уточни имя.")
+        return
+    await update.effective_message.reply_text(
+        f"Удалить весь архив переписки с «{contacts[0]['name']}» из базы и Google Doc?",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("Удалить", callback_data=f"{ARCHIVE_CALLBACK_PREFIX}delete:{contacts[0]['id']}")],
+            [InlineKeyboardButton("Отмена", callback_data=f"{ARCHIVE_CALLBACK_PREFIX}cancel:no")],
+        ]),
+    )
+
+
+async def telegram_delete_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.effective_message.reply_text(
+        "Удалить все архивы переписки из базы и Google Docs, а также отключить синхронизацию? Это нельзя отменить.",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("Удалить всё", callback_data=f"{ARCHIVE_CALLBACK_PREFIX}delete_all:yes")],
+            [InlineKeyboardButton("Отмена", callback_data=f"{ARCHIVE_CALLBACK_PREFIX}cancel:no")],
+        ]),
     )
 
 

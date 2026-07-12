@@ -20,7 +20,8 @@ logger = logging.getLogger(__name__)
 DEFAULT_CREDS_PATH = Path(__file__).parent / ".secrets" / "google-credentials.json"
 DEFAULT_OAUTH_CLIENT_PATH = Path(__file__).parent / ".secrets" / "google-oauth-client.json"
 DEFAULT_OAUTH_TOKEN_PATH = Path(__file__).parent / ".secrets" / "google-oauth-token.json"
-DOC_ID = os.getenv("GOOGLE_DOC_ID", "1Y4GFJFYwktciQpmkdteBqgqiTLbqCM8kNICaB50a3-U")
+DOC_ID = os.getenv("GOOGLE_DOC_ID", "1wDR5jAx7Y8rQetmdY1WyHSvtyZYKM0n-qdWEuSLVe_s")
+CONVERSATION_DOC_ID = os.getenv("GOOGLE_CONVERSATION_DOC_ID", "1zs57P-lBgM8oBOajx2SfbbKwjrbrdfJk1GZAKrYdO8Q")
 CREDS_PATH = Path(os.getenv("GOOGLE_APPLICATION_CREDENTIALS", str(DEFAULT_CREDS_PATH)))
 OAUTH_CLIENT_PATH = Path(os.getenv("GOOGLE_OAUTH_CLIENT_SECRET", str(DEFAULT_OAUTH_CLIENT_PATH)))
 OAUTH_TOKEN_PATH = Path(os.getenv("GOOGLE_OAUTH_TOKEN", str(DEFAULT_OAUTH_TOKEN_PATH)))
@@ -323,6 +324,50 @@ def delete_tab_by_id(tab_id: str) -> None:
     logger.info("Google Doc tab deleted: %s", tab_id)
 
 
+def create_conversation_tab(contact_name: str, owner_name: str) -> dict:
+    """Create a tab for a contact's Telegram archive in the configured document."""
+    service = _get_service()
+    title = _unique_tab_title(service, _sanitize_title(f"Переписка — {contact_name}")[:100], CONVERSATION_DOC_ID)
+    tab_id = _create_tab(service, title, CONVERSATION_DOC_ID)
+    header = "\n".join(
+        [
+            title,
+            "",
+            f"Ответственный: {owner_name or '-'}",
+            f"Создано: {datetime.now().strftime('%Y-%m-%d %H:%M')}",
+            "",
+            "Сообщения Telegram",
+            "",
+        ]
+    )
+    try:
+        _insert_tab_content(service, tab_id, header, CONVERSATION_DOC_ID)
+        return {"tab_id": tab_id, "url": f"https://docs.google.com/document/d/{CONVERSATION_DOC_ID}/edit?tab={tab_id}"}
+    except Exception:
+        with suppress(Exception):
+            _delete_tab(service, tab_id, CONVERSATION_DOC_ID)
+        raise
+
+
+def append_conversation_messages(tab_id: str, messages: list[dict]) -> None:
+    """Append an ordered batch of archived Telegram messages to a conversation tab."""
+    if not messages:
+        return
+    lines = []
+    for message in messages:
+        created_at = str(message.get("sent_at") or "").replace("T", " ").replace("+00:00", " UTC")
+        author = "Менеджер" if message.get("outgoing") else "Контакт"
+        text = str(message.get("text") or "").strip() or "[без текста]"
+        media = str(message.get("media") or "").strip()
+        lines.extend([f"[{created_at}] {author}", text, media] if media else [f"[{created_at}] {author}", text])
+        lines.append("")
+    _append_tab_content(_get_service(), tab_id, "\n".join(lines) + "\n", CONVERSATION_DOC_ID)
+
+
+def delete_conversation_tab_by_id(tab_id: str) -> None:
+    _delete_tab(_get_service(), tab_id, CONVERSATION_DOC_ID)
+
+
 def _share_document_by_link(document_id: str) -> None:
     if TRANSCRIPT_DOC_PERMISSION not in {"reader", "commenter", "writer"}:
         raise RuntimeError(
@@ -360,10 +405,10 @@ def _copy_tab_text(service, source_tab_id: str, title: str) -> str:
         raise
 
 
-def _create_tab(service, title: str) -> str:
+def _create_tab(service, title: str, document_id: str = DOC_ID) -> str:
     response = _execute_google_request(
         service.documents().batchUpdate(
-            documentId=DOC_ID,
+            documentId=document_id,
             body={
                 "requests": [
                     {
@@ -382,12 +427,12 @@ def _create_tab(service, title: str) -> str:
     tab_id = tab_properties.get("tabId")
     if not tab_id:
         raise RuntimeError(f"Google Docs did not return tabId: {response}")
-    _verify_tab_exists(service, tab_id, title)
+    _verify_tab_exists(service, tab_id, title, document_id)
     return tab_id
 
 
-def _unique_tab_title(service, base_title: str) -> str:
-    existing_titles = _existing_tab_titles(service)
+def _unique_tab_title(service, base_title: str, document_id: str = DOC_ID) -> str:
+    existing_titles = _existing_tab_titles(service, document_id)
     if base_title not in existing_titles:
         return base_title
 
@@ -400,9 +445,9 @@ def _unique_tab_title(service, base_title: str) -> str:
     raise RuntimeError(f"Could not create a unique Google Docs tab title for {base_title!r}")
 
 
-def _existing_tab_titles(service) -> set[str]:
+def _existing_tab_titles(service, document_id: str = DOC_ID) -> set[str]:
     doc = _execute_google_request(
-        service.documents().get(documentId=DOC_ID, includeTabsContent=True)
+        service.documents().get(documentId=document_id, includeTabsContent=True)
     )
     return {
         properties.get("title", "")
@@ -461,11 +506,11 @@ def _matching_title_index(title: str, base_title: str) -> int | None:
     return None
 
 
-def _insert_tab_content(service, tab_id: str, content: str) -> None:
+def _insert_tab_content(service, tab_id: str, content: str, document_id: str = DOC_ID) -> None:
     title_end = 1 + _utf16_len(content.splitlines()[0])
     _execute_google_request(
         service.documents().batchUpdate(
-        documentId=DOC_ID,
+        documentId=document_id,
         body={
             "requests": [
                 {
@@ -490,18 +535,27 @@ def _insert_tab_content(service, tab_id: str, content: str) -> None:
     )
 
 
-def _delete_tab(service, tab_id: str) -> None:
+def _append_tab_content(service, tab_id: str, content: str, document_id: str = DOC_ID) -> None:
     _execute_google_request(
         service.documents().batchUpdate(
-        documentId=DOC_ID,
+            documentId=document_id,
+            body={"requests": [{"insertText": {"endOfSegmentLocation": {"tabId": tab_id}, "text": content}}]},
+        )
+    )
+
+
+def _delete_tab(service, tab_id: str, document_id: str = DOC_ID) -> None:
+    _execute_google_request(
+        service.documents().batchUpdate(
+        documentId=document_id,
         body={"requests": [{"deleteTab": {"tabId": tab_id}}]},
         )
     )
 
 
-def _verify_tab_exists(service, tab_id: str, title: str) -> None:
+def _verify_tab_exists(service, tab_id: str, title: str, document_id: str = DOC_ID) -> None:
     doc = _execute_google_request(
-        service.documents().get(documentId=DOC_ID, includeTabsContent=True)
+        service.documents().get(documentId=document_id, includeTabsContent=True)
     )
     tabs = doc.get("tabs", [])
     for tab in tabs:

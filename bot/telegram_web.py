@@ -9,8 +9,9 @@ from bot.telegram_user import TelegramUserError, two_factor_html
 
 
 class TelegramTwoFactorServer:
-    def __init__(self, service) -> None:
+    def __init__(self, service, bot=None) -> None:
         self.service = service
+        self.bot = bot
         self.host = os.getenv("TELEGRAM_2FA_CALLBACK_HOST", "127.0.0.1")
         self.port = int(os.getenv("TELEGRAM_2FA_CALLBACK_PORT", "8094"))
         self._runner: web.AppRunner | None = None
@@ -35,7 +36,12 @@ class TelegramTwoFactorServer:
 
     async def post(self, request: web.Request) -> web.Response:
         try:
-            await self.service.complete_two_factor_login(request.match_info["token"], (await request.post()).get("password", ""))
+            result = await self.service.complete_two_factor_login(request.match_info["token"], (await request.post()).get("password", ""))
         except TelegramUserError as exc:
             return web.Response(text=two_factor_html(str(exc)), content_type="text/html", status=400)
+        if self.bot:
+            await self.bot.send_message(
+                result["telegram_user_id"],
+                "Личный Telegram подключён. Открой /telegram_privacy, чтобы подтвердить или отклонить сохранение полной переписки с контактами.",
+            )
         return web.Response(text=two_factor_html("Telegram подключён. Можно вернуться в бот."), content_type="text/html")

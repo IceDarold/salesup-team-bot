@@ -16,6 +16,7 @@ NOTION_API_BASE = "https://api.notion.com/v1"
 NOTION_VERSION = "2022-06-28"
 SCHEDULED_STATUS = "Sheduled"
 INTERVIEWER_FEEDBACK_PROPERTY = "Interviewer feedback"
+CONTACT_CONVERSATION_PROPERTY = "Переписка"
 NOTION_MAX_RETRIES = int(os.getenv("NOTION_MAX_RETRIES", "3"))
 NOTION_RETRY_BACKOFF_SECONDS = float(os.getenv("NOTION_RETRY_BACKOFF_SECONDS", "1.5"))
 STATS_TIMEZONE = os.getenv("STATS_TIMEZONE", "Asia/Nicosia")
@@ -229,7 +230,7 @@ def find_contacts(
         if expected_source and item["source"].casefold() != expected_source:
             continue
         contacts.append(item)
-        if len(contacts) >= max(1, min(limit, 50)):
+        if len(contacts) >= max(1, min(limit, 1000)):
             break
     return contacts
 
@@ -296,6 +297,23 @@ def update_contact_status(*, contact_id: str, owner_id: str, status: str, action
         source=action_source,
     )
     return {"name": name, "url": page.get("url") or "", "status": target_status}
+
+
+def update_contact_conversation_url(contact_id: str, url: str) -> None:
+    """Store the Google Docs archive link on a Contacts page."""
+    if not contact_id or not url:
+        return
+    client = _NotionClient()
+    _ensure_contact_conversation_property(client)
+    client.update_page(contact_id, {CONTACT_CONVERSATION_PROPERTY: {"url": url}})
+
+
+def clear_contact_conversation_url(contact_id: str) -> None:
+    if not contact_id:
+        return
+    client = _NotionClient()
+    _ensure_contact_conversation_property(client)
+    client.update_page(contact_id, {CONTACT_CONVERSATION_PROPERTY: {"url": None}})
 
 
 def record_team_action(
@@ -1101,6 +1119,18 @@ def _ensure_interviewer_feedback_property(client) -> None:
         "PATCH",
         f"/databases/{db_id}",
         {"properties": {INTERVIEWER_FEEDBACK_PROPERTY: {"url": {}}}},
+    )
+
+
+def _ensure_contact_conversation_property(client) -> None:
+    db_id = _contacts_db_id()
+    database = client.retrieve_database(db_id)
+    if CONTACT_CONVERSATION_PROPERTY in database.get("properties", {}):
+        return
+    client._request(
+        "PATCH",
+        f"/databases/{db_id}",
+        {"properties": {CONTACT_CONVERSATION_PROPERTY: {"url": {}}}},
     )
 
 

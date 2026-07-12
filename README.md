@@ -49,6 +49,22 @@ The encrypted session is stored separately for that Telegram user. The agent may
 prepare an outgoing message, but sends it only after the account owner presses
 the confirmation button.
 
+After connecting, the bot asks for explicit consent to archive the complete
+history of personal chats that can be matched unambiguously to that member's
+Contacts records (by `@username`, `t.me` link, phone, or Telegram ID). Both
+incoming and outgoing messages are stored in the runtime SQLite database and
+appended to a dedicated tab per contact in `GOOGLE_CONVERSATION_DOC_ID`. The tab URL is stored
+in the Contacts property `Переписка`, which the bot creates automatically when
+needed. Groups, channels, bots, unmatched chats, and ambiguous matches are never
+archived.
+
+Use `/telegram_privacy` to view or grant consent, `/telegram_export <contact>`
+to force a sync and get its Google Docs URL, `/telegram_delete <contact>` to
+delete one archive, and `/telegram_delete_all` to delete all archives and disable
+further synchronization. The periodic sync is configured by
+`TELEGRAM_ARCHIVE_SYNC_SECONDS` (default `300`). A deleted contact stays excluded
+from automatic re-import; `/telegram_export <contact>` explicitly enables it again.
+
 Set `TELEGRAM_SESSION_ENCRYPTION_KEY` to a Fernet key. `TELEGRAM_API_ID` and
 `TELEGRAM_API_HASH` are also required. For Telegram accounts protected by 2FA,
 configure `TELEGRAM_2FA_WEB_BASE_URL` as a public HTTPS URL and proxy
