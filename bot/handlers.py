@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import re
+import secrets
 import shutil
 import socket
 import subprocess
@@ -15,7 +16,7 @@ import tempfile
 import time
 import urllib.parse
 import urllib.request
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -23,6 +24,7 @@ from telegram.ext import ContextTypes, ConversationHandler
 
 from bot.access import get_notion_member
 from bot.agent import SalesUpAgent
+from bot.agent_tools import execute_prepared_action
 from notion_store import (
     create_contact,
     get_contact_form_options,
@@ -47,6 +49,8 @@ SUMMARY_CHAT_ID_ENV = "SUMMARY_CHAT_ID"
 SUMMARY_CHAT_ID_KEY = "summary_chat_id"
 KNOWN_SUMMARY_GROUPS_KEY = "known_summary_groups"
 SETTINGS_PATH = Path(os.getenv("BOT_SETTINGS_PATH", "data/settings.json"))
+AGENT_PREPARED_ACTION_KEY = "agent_prepared_action"
+AGENT_ACTION_PREFIX = "agent_action:"
 
 (
     NAME,
@@ -233,15 +237,81 @@ async def agent_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     progress = await message.reply_text("Думаю…")
     chat = update.effective_chat
     try:
-        answer = await SalesUpAgent().run(
+        result = await SalesUpAgent().run(
             text=text,
             member=member,
             is_group=bool(chat and chat.type != "private"),
         )
     except Exception:
         logger.exception("SalesUp agent failed")
-        answer = "Не смог обработать запрос. Попробуй ещё раз немного позже."
-    await progress.edit_text(answer[:4000])
+        await progress.edit_text("Не смог обработать запрос. Попробуй ещё раз немного позже.")
+        return
+
+    if result.prepared_action:
+        token = secrets.token_urlsafe(8)
+        context.user_data[AGENT_PREPARED_ACTION_KEY] = {
+            "token": token,
+            "telegram_user_id": update.effective_user.id,
+            "action": result.prepared_action,
+        }
+        await progress.edit_text(
+            result.text[:4000],
+            reply_markup=InlineKeyboardMarkup(
+                [
+                    [
+                        InlineKeyboardButton("✅ Подтвердить", callback_data=f"{AGENT_ACTION_PREFIX}confirm:{token}"),
+                        InlineKeyboardButton("Отменить", callback_data=f"{AGENT_ACTION_PREFIX}cancel:{token}"),
+                    ]
+                ]
+            ),
+        )
+        return
+    await progress.edit_text(result.text[:4000])
+
+
+async def agent_action_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+    try:
+        _, decision, token = (query.data or "").split(":", 2)
+    except ValueError:
+        await query.edit_message_text("Не удалось распознать действие.")
+        return
+
+    pending = context.user_data.get(AGENT_PREPARED_ACTION_KEY) or {}
+    if pending.get("token") != token or pending.get("telegram_user_id") != update.effective_user.id:
+        await query.edit_message_text("Это действие больше недоступно.")
+        return
+    action = pending.get("action") or {}
+    try:
+        expired = datetime.fromisoformat(str(action.get("expires_at") or "")) <= datetime.now(timezone.utc)
+    except ValueError:
+        expired = True
+    if expired:
+        context.user_data.pop(AGENT_PREPARED_ACTION_KEY, None)
+        await query.edit_message_text("Срок подтверждения истёк. Отправь запрос ещё раз.")
+        return
+    if decision == "cancel":
+        context.user_data.pop(AGENT_PREPARED_ACTION_KEY, None)
+        await query.edit_message_text("Действие отменено.")
+        return
+    if decision != "confirm":
+        await query.edit_message_text("Неизвестное действие.")
+        return
+
+    await query.edit_message_text("Сохраняю в Notion…")
+    try:
+        url = await asyncio.to_thread(execute_prepared_action, action)
+    except Exception:
+        logger.exception("Unable to execute confirmed agent action")
+        await query.edit_message_text("Не удалось выполнить действие в Notion. Ничего не изменено.")
+        return
+
+    context.user_data.pop(AGENT_PREPARED_ACTION_KEY, None)
+    text = "Готово — контакт добавлен в Notion со статусом «Новый»."
+    if url:
+        text += f"\n{url}"
+    await query.edit_message_text(text)
 
 
 async def add_contact(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
