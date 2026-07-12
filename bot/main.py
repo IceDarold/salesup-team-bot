@@ -181,7 +181,6 @@ def main() -> None:
         logger.info("Using local Telegram Bot API server: %s", base_url)
 
     app = builder.build()
-    app.bot_data["telegram_user_service"] = TelegramUserService()
     app.add_handler(
         ConversationHandler(
             entry_points=[
@@ -328,7 +327,9 @@ async def setup_commands(app: Application) -> None:
         await app.bot.set_chat_menu_button(menu_button=MenuButtonCommands())
     except Exception as e:
         logger.warning("Failed to set commands menu: %s", e)
-    server = TelegramTwoFactorServer(app.bot_data["telegram_user_service"])
+    service = app.bot_data.get("telegram_user_service") or TelegramUserService()
+    app.bot_data["telegram_user_service"] = service
+    server = TelegramTwoFactorServer(service)
     app.bot_data["telegram_two_factor_server"] = server
     try:
         await server.start()
