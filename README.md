@@ -27,6 +27,11 @@ Every contact creation, status update, agent-sent Telegram message, and confirme
 manual contact action is written to the `Действия команды` Notion database when
 `NOTION_TEAM_ACTIONS_DB_ID` is configured.
 
+Every morning, the bot sends each team member a private reminder for their
+contacts with a non-empty `Следующий шаг` and `Дата` equal to today. Configure
+the schedule with `NEXT_STEP_REMINDER_TIME` (default `09:00`) and
+`NEXT_STEP_REMINDER_TIMEZONE` (default `Asia/Nicosia`).
+
 ## SalesUp agent
 
 Any ordinary text message is handled by a bounded LLM tool loop. It can answer

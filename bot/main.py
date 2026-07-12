@@ -4,7 +4,9 @@ import os
 import sys
 import urllib.error
 import urllib.request
+from datetime import datetime, time
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from telegram import BotCommand, MenuButtonCommands
 from telegram.ext import (
@@ -39,6 +41,7 @@ load_dotenv()
 from bot.access import admin_required, init_access_db, member_required  # noqa: E402
 from bot.telegram_user import TelegramUserService  # noqa: E402
 from bot.telegram_web import TelegramTwoFactorServer  # noqa: E402
+from notion_store import get_contacts_with_next_step_on, list_team_members  # noqa: E402
 from bot.handlers import (  # noqa: E402
     ARTIFACT_DECISION,
     ARCHIVE_DECISION,
@@ -130,6 +133,8 @@ TELEGRAM_READ_TIMEOUT = int(os.getenv("TELEGRAM_READ_TIMEOUT", "600"))
 TELEGRAM_WRITE_TIMEOUT = int(os.getenv("TELEGRAM_WRITE_TIMEOUT", "600"))
 TELEGRAM_CONNECT_TIMEOUT = int(os.getenv("TELEGRAM_CONNECT_TIMEOUT", "30"))
 TELEGRAM_POOL_TIMEOUT = int(os.getenv("TELEGRAM_POOL_TIMEOUT", "30"))
+NEXT_STEP_REMINDER_TIME = os.getenv("NEXT_STEP_REMINDER_TIME", "09:00")
+NEXT_STEP_REMINDER_TIMEZONE = os.getenv("NEXT_STEP_REMINDER_TIMEZONE", "Asia/Nicosia")
 PERSISTENCE_PATH = Path(os.getenv("BOT_PERSISTENCE_PATH", "data/bot-state.pickle"))
 
 COMMANDS = [
@@ -308,6 +313,7 @@ def main() -> None:
     app.add_handler(ChatMemberHandler(remember_bot_chat_member, ChatMemberHandler.MY_CHAT_MEMBER))
     app.add_handler(MessageHandler(filters.ChatType.GROUPS, remember_group), group=10)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, member_required(agent_message)))
+    schedule_next_step_reminders(app)
 
     logger.info("Interview bot starting")
     app.run_polling()
@@ -351,6 +357,46 @@ async def shutdown(app: Application) -> None:
         await service.close()
     telegram_two_factor_server = None
     telegram_user_service = None
+
+
+def schedule_next_step_reminders(app: Application) -> None:
+    try:
+        hour, minute = (int(part) for part in NEXT_STEP_REMINDER_TIME.split(":", 1))
+        scheduled_time = time(hour=hour, minute=minute, tzinfo=ZoneInfo(NEXT_STEP_REMINDER_TIMEZONE))
+    except (ValueError, TypeError):
+        logger.warning("Invalid NEXT_STEP_REMINDER_TIME=%r; using 09:00", NEXT_STEP_REMINDER_TIME)
+        scheduled_time = time(hour=9, minute=0, tzinfo=ZoneInfo("Asia/Nicosia"))
+    app.job_queue.run_daily(next_step_reminders_job, time=scheduled_time, name="next_step_reminders")
+
+
+async def next_step_reminders_job(context) -> None:
+    try:
+        target_date = datetime.now(ZoneInfo(NEXT_STEP_REMINDER_TIMEZONE)).date()
+        contacts = await asyncio.to_thread(get_contacts_with_next_step_on, target_date)
+        members = await asyncio.to_thread(list_team_members)
+    except Exception:
+        logger.exception("Unable to load next-step reminders")
+        return
+
+    members_by_id = {member.get("id"): member for member in members}
+    reminders: dict[int, list[dict]] = {}
+    for contact in contacts:
+        for owner_id in contact["owner_ids"]:
+            member = members_by_id.get(owner_id) or {}
+            try:
+                user_id = int(member.get("telegram_user_id") or "")
+            except (TypeError, ValueError):
+                continue
+            reminders.setdefault(user_id, []).append(contact)
+
+    for user_id, items in reminders.items():
+        lines = [f"☀️ <b>Следующие шаги на сегодня — {target_date.strftime('%d.%m')}</b>", ""]
+        for index, item in enumerate(items, start=1):
+            lines.append(f"{index}. <b>{item['name']}</b> — {item['next_step']}")
+        try:
+            await context.bot.send_message(user_id, "\n".join(lines), parse_mode="HTML")
+        except Exception:
+            logger.exception("Unable to send next-step reminder to Telegram user %s", user_id)
 
 
 if __name__ == "__main__":

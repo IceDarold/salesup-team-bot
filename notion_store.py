@@ -234,6 +234,32 @@ def find_contacts(
     return contacts
 
 
+def get_contacts_with_next_step_on(target_date: date) -> list[dict]:
+    """Return contacts whose `Дата` is today and have a non-empty next step."""
+    response = _NotionClient().query_database_all(
+        _contacts_db_id(),
+        {
+            "filter": {"property": "Дата", "date": {"equals": target_date.isoformat()}},
+            "page_size": 100,
+        },
+    )
+    result = []
+    for page in response.get("results", []):
+        props = page.get("properties", {})
+        next_step = _prop_text(props.get("Следующий шаг"))
+        owner_ids = _prop_relation(props.get("Owner"))
+        if not next_step or not owner_ids:
+            continue
+        result.append(
+            {
+                "name": _prop_title(props.get("Name")) or "Без названия",
+                "next_step": next_step,
+                "owner_ids": owner_ids,
+            }
+        )
+    return result
+
+
 def get_contact_status_options() -> list[str]:
     """Return the statuses currently configured in the Contacts database."""
     database = _NotionClient().retrieve_database(_contacts_db_id())
