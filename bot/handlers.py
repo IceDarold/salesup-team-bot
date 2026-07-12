@@ -22,6 +22,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes, ConversationHandler
 
 from bot.access import get_notion_member
+from bot.agent import SalesUpAgent
 from notion_store import (
     create_contact,
     get_contact_form_options,
@@ -216,6 +217,31 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         f"• Доходимость: {overall['attendance']}%",
     ]
     await update.effective_message.reply_text("\n".join(lines), parse_mode="HTML")
+
+
+async def agent_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle an ordinary message through the bounded SalesUp agent loop."""
+    message = update.effective_message
+    text = (message.text or "").strip()
+    if not text:
+        return
+    member = await get_notion_member(update.effective_user, context)
+    if not member:
+        await message.reply_text("Не нашёл тебя в базе Team Members.")
+        return
+
+    progress = await message.reply_text("Думаю…")
+    chat = update.effective_chat
+    try:
+        answer = await SalesUpAgent().run(
+            text=text,
+            member=member,
+            is_group=bool(chat and chat.type != "private"),
+        )
+    except Exception:
+        logger.exception("SalesUp agent failed")
+        answer = "Не смог обработать запрос. Попробуй ещё раз немного позже."
+    await progress.edit_text(answer[:4000])
 
 
 async def add_contact(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:

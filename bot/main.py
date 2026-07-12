@@ -62,6 +62,7 @@ from bot.handlers import (  # noqa: E402
     SUBJECT,
     add_member_cmd,
     add_contact,
+    agent_message,
     archive_decision,
     archive_decision_text,
     artifact_decision,
@@ -296,6 +297,7 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(admin_required(choose_summary_chat), pattern=r"^summary_chat:"))
     app.add_handler(ChatMemberHandler(remember_bot_chat_member, ChatMemberHandler.MY_CHAT_MEMBER))
     app.add_handler(MessageHandler(filters.ChatType.GROUPS, remember_group), group=10)
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, member_required(agent_message)))
 
     logger.info("Interview bot starting")
     app.run_polling()

@@ -185,6 +185,44 @@ def create_contact(*, owner_id: str, name: str, contact: str, segment: str, sour
     return response.get("url") or ""
 
 
+def find_contacts(
+    *,
+    member_page_id: str | None = None,
+    query: str = "",
+    status: str = "",
+    segment: str = "",
+    source: str = "",
+    limit: int = 20,
+) -> list[dict]:
+    """Find Contacts by text and structured fields, optionally scoped to one owner."""
+    payload: dict = {"page_size": 100}
+    if member_page_id:
+        payload["filter"] = {"property": "Owner", "relation": {"contains": member_page_id}}
+    response = _NotionClient().query_database_all(_contacts_db_id(), payload)
+    needle = query.casefold().strip()
+    expected_status = status.casefold().strip()
+    expected_segment = segment.casefold().strip()
+    expected_source = source.casefold().strip()
+    contacts = []
+    for page in response.get("results", []):
+        item = _contact_from_page(page)
+        haystack = " ".join(
+            [item["name"], item["contact"], item["status"], ", ".join(item["segments"]), item["source"]]
+        ).casefold()
+        if needle and needle not in haystack:
+            continue
+        if expected_status and item["status"].casefold() != expected_status:
+            continue
+        if expected_segment and expected_segment not in {value.casefold() for value in item["segments"]}:
+            continue
+        if expected_source and item["source"].casefold() != expected_source:
+            continue
+        contacts.append(item)
+        if len(contacts) >= max(1, min(limit, 50)):
+            break
+    return contacts
+
+
 def _contacts_db_id() -> str:
     db_id = os.getenv("NOTION_CONTACTS_DB_ID")
     if not db_id:
@@ -779,7 +817,13 @@ def _team_member_from_page(page: dict) -> dict:
 def _contact_from_page(page: dict) -> dict:
     props = page.get("properties", {})
     return {
+        "id": page.get("id", ""),
+        "url": page.get("url", ""),
+        "name": _prop_title(props.get("Name")),
+        "contact": _prop_text(props.get("Контакт")),
         "status": _prop_status(props.get("Status")),
+        "segments": _prop_multi_select(props.get("Segment")),
+        "source": _prop_select(props.get("Источник")),
         "last_touch": _prop_date(props.get("Последнее касание")),
     }
 

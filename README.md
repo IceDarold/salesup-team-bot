@@ -23,6 +23,16 @@ the name and contact, offers the current Notion segments and sources as inline
 buttons, and lets the user add a new value when needed. New contacts are assigned
 to the person who added them and start with the `Новый` status.
 
+## SalesUp agent
+
+Any ordinary text message is handled by a bounded LLM tool loop. It can answer
+questions using personal data in a private chat and team data in a group: contact
+statistics and contact search by name, status, segment, or source. The agent has
+read-only access; creating or changing a contact remains an explicit bot flow.
+
+It uses `AGENT_API_KEY`, `AGENT_BASE_URL`, and `AGENT_MODEL` when set, otherwise
+falls back to the existing `INSIGHTS_*` settings.
+
 ## Setup
 
 ```bash
