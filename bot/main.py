@@ -123,6 +123,8 @@ logging.basicConfig(
 )
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger("bot")
+telegram_user_service: TelegramUserService | None = None
+telegram_two_factor_server: TelegramTwoFactorServer | None = None
 
 TELEGRAM_READ_TIMEOUT = int(os.getenv("TELEGRAM_READ_TIMEOUT", "600"))
 TELEGRAM_WRITE_TIMEOUT = int(os.getenv("TELEGRAM_WRITE_TIMEOUT", "600"))
@@ -322,15 +324,17 @@ def check_local_bot_api(token: str, base_url: str) -> None:
 
 
 async def setup_commands(app: Application) -> None:
+    global telegram_user_service, telegram_two_factor_server
     try:
         await app.bot.set_my_commands(COMMANDS)
         await app.bot.set_chat_menu_button(menu_button=MenuButtonCommands())
     except Exception as e:
         logger.warning("Failed to set commands menu: %s", e)
-    service = app.bot_data.get("telegram_user_service") or TelegramUserService()
-    app.bot_data["telegram_user_service"] = service
+    service = telegram_user_service or TelegramUserService()
+    telegram_user_service = service
+    app._telegram_user_service = service
     server = TelegramTwoFactorServer(service)
-    app.bot_data["telegram_two_factor_server"] = server
+    telegram_two_factor_server = server
     try:
         await server.start()
     except Exception as e:
@@ -338,12 +342,15 @@ async def setup_commands(app: Application) -> None:
 
 
 async def shutdown(app: Application) -> None:
-    server = app.bot_data.get("telegram_two_factor_server")
+    global telegram_user_service, telegram_two_factor_server
+    server = telegram_two_factor_server
     if server:
         await server.stop()
-    service = app.bot_data.get("telegram_user_service")
+    service = telegram_user_service
     if service:
         await service.close()
+    telegram_two_factor_server = None
+    telegram_user_service = None
 
 
 if __name__ == "__main__":

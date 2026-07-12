@@ -131,6 +131,13 @@ LANGUAGE_KB = InlineKeyboardMarkup(
 )
 
 
+def _telegram_user_service(context: ContextTypes.DEFAULT_TYPE):
+    service = getattr(context.application, "_telegram_user_service", None)
+    if service is None:
+        raise RuntimeError("Telegram user service is not initialized.")
+    return service
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     member = await get_notion_member(update.effective_user, context)
     display_name = (member or {}).get("name") or update.effective_user.first_name or "привет"
@@ -243,7 +250,7 @@ async def agent_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             text=text,
             member=member,
             is_group=bool(chat and chat.type != "private"),
-            telegram_service=context.application.bot_data.get("telegram_user_service"),
+            telegram_service=_telegram_user_service(context),
         )
     except Exception:
         logger.exception("SalesUp agent failed")
@@ -276,7 +283,7 @@ async def telegram_account(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     if update.effective_chat and update.effective_chat.type != "private":
         await update.effective_message.reply_text("Подключать личный Telegram можно только в личном чате с ботом.")
         return
-    service = context.application.bot_data["telegram_user_service"]
+    service = _telegram_user_service(context)
     user_id = update.effective_user.id
     status = service.status(user_id)
     if not status["configured"]:
@@ -358,7 +365,7 @@ async def agent_action_callback(update: Update, context: ContextTypes.DEFAULT_TY
 
     await query.edit_message_text("Сохраняю в Notion…")
     try:
-        url = await execute_prepared_action(action, context.application.bot_data.get("telegram_user_service"))
+        url = await execute_prepared_action(action, _telegram_user_service(context))
     except Exception:
         logger.exception("Unable to execute confirmed agent action")
         await query.edit_message_text("Не удалось выполнить действие в Notion. Ничего не изменено.")
