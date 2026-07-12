@@ -171,7 +171,7 @@ def get_contact_form_options() -> dict[str, list[str]]:
     }
 
 
-def create_contact(*, owner_id: str, name: str, contact: str, segment: str, source: str) -> str:
+def create_contact(*, owner_id: str, name: str, contact: str, segment: str, source: str, action_source: str = "Бот") -> str:
     """Create a new Contacts page assigned to the team member who added it."""
     properties = {
         "Name": _title(name),
@@ -182,6 +182,17 @@ def create_contact(*, owner_id: str, name: str, contact: str, segment: str, sour
         "Источник": {"select": {"name": source}},
     }
     response = _NotionClient().create_page(_contacts_db_id(), properties)
+    _record_action_safely(
+        owner_id=owner_id,
+        contact_id=response.get("id", ""),
+        title=f"Создал контакт: {name}",
+        action_type="Создал контакт",
+        channel="Бот",
+        status_after="Новый",
+        result="Не применимо",
+        comment=contact,
+        source=action_source,
+    )
     return response.get("url") or ""
 
 
@@ -233,7 +244,7 @@ def get_contact_status_options() -> list[str]:
     return [item.get("name", "") for item in options if item.get("name")]
 
 
-def update_contact_status(*, contact_id: str, owner_id: str, status: str) -> dict:
+def update_contact_status(*, contact_id: str, owner_id: str, status: str, action_source: str = "Агент") -> dict:
     """Update one of the caller's contacts to a configured status."""
     client = _NotionClient()
     page = client.retrieve_page(contact_id)
@@ -245,8 +256,71 @@ def update_contact_status(*, contact_id: str, owner_id: str, status: str) -> dic
     target_status = normalized.get(status.strip().casefold())
     if not target_status:
         raise ValueError(f"Статус «{status}» недоступен для Contacts.")
+    old_status = _prop_status(props.get("Status"))
     client.update_page(contact_id, {"Status": {"status": {"name": target_status}}})
-    return {"name": _prop_title(props.get("Name")), "url": page.get("url") or "", "status": target_status}
+    name = _prop_title(props.get("Name"))
+    _record_action_safely(
+        owner_id=owner_id,
+        contact_id=contact_id,
+        title=f"Изменил статус: {name}",
+        action_type="Изменил статус",
+        status_before=old_status,
+        status_after=target_status,
+        result=_result_for_status(target_status),
+        source=action_source,
+    )
+    return {"name": name, "url": page.get("url") or "", "status": target_status}
+
+
+def record_team_action(
+    *,
+    owner_id: str,
+    title: str,
+    action_type: str,
+    contact_id: str = "",
+    channel: str = "",
+    status_before: str = "",
+    status_after: str = "",
+    result: str = "",
+    comment: str = "",
+    source: str = "Бот",
+) -> str:
+    db_id = os.getenv("NOTION_TEAM_ACTIONS_DB_ID")
+    if not db_id:
+        raise RuntimeError("NOTION_TEAM_ACTIONS_DB_ID environment variable is not set.")
+    properties = {
+        "Действие": _title(title),
+        "Дата и время": {"date": {"start": datetime.now(ZoneInfo(STATS_TIMEZONE)).isoformat()}},
+        "Участник": _relation(owner_id),
+        "Контакт": _relation(contact_id) if contact_id else None,
+        "Тип действия": {"select": {"name": action_type}},
+        "Канал": {"select": {"name": channel}} if channel else None,
+        "Статус до": {"select": {"name": status_before}} if status_before else None,
+        "Статус после": {"select": {"name": status_after}} if status_after else None,
+        "Результат": {"select": {"name": result}} if result else None,
+        "Комментарий": _rich_text(comment),
+        "Источник записи": {"select": {"name": source}},
+    }
+    response = _NotionClient().create_page(db_id, properties)
+    return response.get("url") or ""
+
+
+def _record_action_safely(**kwargs) -> None:
+    if not os.getenv("NOTION_TEAM_ACTIONS_DB_ID"):
+        return
+    try:
+        record_team_action(**kwargs)
+    except Exception:
+        logger.exception("Unable to record team action")
+
+
+def _result_for_status(status: str) -> str:
+    return {
+        "Ответил": "Ответил",
+        "Согласился на интервью": "Согласился",
+        "Отказ": "Отказ",
+        "No response": "Нет ответа",
+    }.get(status, "Не применимо")
 
 
 def _contacts_db_id() -> str:

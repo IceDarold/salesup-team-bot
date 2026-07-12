@@ -11,6 +11,7 @@ from notion_store import (
     find_contacts,
     get_contact_stats,
     get_contact_status_options,
+    record_team_action,
     update_contact_status,
 )
 
@@ -99,7 +100,19 @@ async def execute_prepared_action(action: dict[str, Any], telegram_service=None)
             raise ValueError("Подключение личного Telegram недоступно.")
         payload = action.get("payload") or {}
         await telegram_service.send_message(payload["telegram_user_id"], payload["recipient"], payload["text"])
+        await asyncio.to_thread(
+            record_team_action,
+            owner_id=payload["owner_id"],
+            contact_id=payload.get("contact_id", ""),
+            title=f"Написал в Telegram: {payload['recipient']}",
+            action_type="Написал",
+            channel="Telegram",
+            comment=payload["text"],
+            source="Агент",
+        )
         return ""
+    if action.get("kind") == "record_team_action":
+        return await asyncio.to_thread(record_team_action, **(action.get("payload") or {}))
     raise ValueError("Неизвестное подготовленное действие.")
 
 
@@ -133,7 +146,7 @@ def _prepare_create_contact(context: AgentToolContext, arguments: dict[str, Any]
         return {"ok": False, "error": f"Не хватает данных: {', '.join(missing)}."}
     action = {
         "kind": "create_contact",
-        "payload": {"owner_id": context.member["id"], **required},
+        "payload": {"owner_id": context.member["id"], "action_source": "Агент", **required},
         "expires_at": prepared_action_expiry(),
     }
     return {"ok": True, "terminal": True, "prepared_action": action}
@@ -158,7 +171,7 @@ def _prepare_update_contact_status(context: AgentToolContext, arguments: dict[st
         return {"ok": False, "error": "Такого статуса нет в базе Contacts."}
     action = {
         "kind": "update_contact_status",
-        "payload": {"contact_id": contact_id, "owner_id": context.member["id"], "status": target_status},
+        "payload": {"contact_id": contact_id, "owner_id": context.member["id"], "status": target_status, "action_source": "Агент"},
         "contact_name": contact.get("name") or "контакт",
         "current_status": contact.get("status") or "—",
         "expires_at": prepared_action_expiry(),
@@ -181,7 +194,36 @@ def _prepare_send_telegram_message(context: AgentToolContext, arguments: dict[st
         "terminal": True,
         "prepared_action": {
             "kind": "send_telegram_message",
-            "payload": {"telegram_user_id": context.member["telegram_user_id"], "recipient": recipient, "text": text},
+        "payload": {"telegram_user_id": context.member["telegram_user_id"], "owner_id": context.member["id"], "recipient": recipient, "text": text},
+            "expires_at": prepared_action_expiry(),
+        },
+    }
+
+
+def _prepare_record_team_action(context: AgentToolContext, arguments: dict[str, Any]) -> dict[str, Any]:
+    if context.is_group:
+        return {"ok": False, "error": "Записывать личное действие можно только в личном чате."}
+    contact_id = str(arguments.get("contact_id") or "").strip()
+    contact = next((item for item in find_contacts(member_page_id=context.owner_id, limit=50) if item.get("id") == contact_id), None)
+    if not contact:
+        return {"ok": False, "error": "Сначала найди один из своих контактов через search_contacts."}
+    action_type = str(arguments.get("action_type") or "").strip()
+    channel = str(arguments.get("channel") or "").strip()
+    if not action_type or not channel:
+        return {"ok": False, "error": "Нужны тип действия и канал."}
+    comment = str(arguments.get("comment") or "").strip()
+    return {
+        "ok": True,
+        "terminal": True,
+        "prepared_action": {
+            "kind": "record_team_action",
+            "contact_name": contact.get("name") or "контакт",
+            "payload": {
+                "owner_id": context.member["id"], "contact_id": contact_id,
+                "title": f"{action_type}: {contact.get('name')}", "action_type": action_type,
+                "channel": channel, "result": str(arguments.get("result") or "Не применимо"),
+                "comment": comment, "source": "Агент",
+            },
             "expires_at": prepared_action_expiry(),
         },
     }
@@ -243,6 +285,18 @@ _SEND_TELEGRAM_MESSAGE_PARAMETERS = {
     "required": ["recipient", "text"],
     "additionalProperties": False,
 }
+_RECORD_TEAM_ACTION_PARAMETERS = {
+    "type": "object",
+    "properties": {
+        "contact_id": {"type": "string"},
+        "action_type": {"type": "string", "enum": ["Написал", "Звонок", "Получил ответ", "Назначил интервью", "Провёл интервью", "Комментарий"]},
+        "channel": {"type": "string", "enum": ["Telegram", "Телефон", "Email", "LinkedIn", "Авито", "Встреча", "Бот"]},
+        "result": {"type": "string", "enum": ["Нет ответа", "Ответил", "Согласился", "Отказ", "Не применимо"]},
+        "comment": {"type": "string"},
+    },
+    "required": ["contact_id", "action_type", "channel"],
+    "additionalProperties": False,
+}
 _TOOLS = (
     ToolSpec(
         name="get_contact_stats",
@@ -296,5 +350,13 @@ _TOOLS = (
         progress_label="Готовлю сообщение…",
         execute=_prepare_send_telegram_message,
         policy=ToolPolicy(toolset="telegram", risk="write", confirmation="required"),
+    ),
+    ToolSpec(
+        name="prepare_record_team_action",
+        description="Подготовить запись ручного касания или действия в журнал команды. Создаётся только после подтверждения.",
+        parameters=_RECORD_TEAM_ACTION_PARAMETERS,
+        progress_label="Готовлю запись действия…",
+        execute=_prepare_record_team_action,
+        policy=ToolPolicy(toolset="contacts", risk="write", confirmation="required"),
     ),
 )

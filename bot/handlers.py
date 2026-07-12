@@ -365,7 +365,9 @@ async def agent_action_callback(update: Update, context: ContextTypes.DEFAULT_TY
         return
 
     context.user_data.pop(AGENT_PREPARED_ACTION_KEY, None)
-    if action.get("kind") == "send_telegram_message":
+    if action.get("kind") == "record_team_action":
+        text = "Готово — действие записано в журнал команды."
+    elif action.get("kind") == "send_telegram_message":
         text = "Готово — сообщение отправлено от твоего имени."
     elif action.get("kind") == "update_contact_status":
         text = "Готово — статус контакта обновлён в Notion."

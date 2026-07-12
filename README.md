@@ -23,6 +23,10 @@ the name and contact, offers the current Notion segments and sources as inline
 buttons, and lets the user add a new value when needed. New contacts are assigned
 to the person who added them and start with the `Новый` status.
 
+Every contact creation, status update, agent-sent Telegram message, and confirmed
+manual contact action is written to the `Действия команды` Notion database when
+`NOTION_TEAM_ACTIONS_DB_ID` is configured.
+
 ## SalesUp agent
 
 Any ordinary text message is handled by a bounded LLM tool loop. It can answer

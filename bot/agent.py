@@ -120,6 +120,15 @@ def _prepared_action_text(action: dict[str, Any]) -> str:
     if action.get("kind") == "send_telegram_message":
         payload = action.get("payload") or {}
         return f"Отправить сообщение от твоего имени получателю {payload.get('recipient')}?\n\n{payload.get('text')}"
+    if action.get("kind") == "record_team_action":
+        payload = action.get("payload") or {}
+        return (
+            "Записать действие в журнал команды?\n\n"
+            f"Контакт: {action.get('contact_name')}\n"
+            f"Действие: {payload.get('action_type')} · {payload.get('channel')}\n"
+            f"Результат: {payload.get('result')}\n"
+            f"Комментарий: {payload.get('comment') or '—'}"
+        )
     return "Подтвердить подготовленное действие?"
 
 
