@@ -273,6 +273,9 @@ async def agent_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 
 async def telegram_account(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.effective_chat and update.effective_chat.type != "private":
+        await update.effective_message.reply_text("Подключать личный Telegram можно только в личном чате с ботом.")
+        return
     service = context.application.bot_data["telegram_user_service"]
     user_id = update.effective_user.id
     status = service.status(user_id)
