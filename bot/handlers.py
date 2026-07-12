@@ -226,7 +226,7 @@ async def add_contact(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
 
     context.user_data.pop("new_contact", None)
     context.user_data["new_contact"] = {"owner_id": member["id"]}
-    await update.effective_message.reply_text("Как зовут человека или компанию?")
+    await update.effective_message.reply_text("<b>1/4</b> Как зовут человека или компанию?", parse_mode="HTML")
     return CONTACT_NAME
 
 
@@ -236,7 +236,9 @@ async def contact_name(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
         await update.effective_message.reply_text("Напиши имя или название контакта.")
         return CONTACT_NAME
     context.user_data["new_contact"]["name"] = name
-    await update.effective_message.reply_text("Укажи контакт: телефон, @username, email или ссылку.")
+    await update.effective_message.reply_text(
+        "<b>2/4</b> Укажи контакт: телефон, @username, email или ссылку.", parse_mode="HTML"
+    )
     return CONTACT_VALUE
 
 
@@ -254,7 +256,7 @@ async def contact_segment(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     await query.answer()
     value = query.data.split(":", 1)[1]
     if value == "new":
-        await query.message.reply_text("Напиши новый сегмент.")
+        await query.message.reply_text("<b>3/4</b> Напиши новый сегмент.", parse_mode="HTML")
         return CONTACT_CUSTOM_SEGMENT
 
     segments = context.user_data.get("contact_segments") or []
@@ -279,7 +281,7 @@ async def contact_source(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     await query.answer()
     value = query.data.split(":", 1)[1]
     if value == "new":
-        await query.message.reply_text("Напиши новый источник.")
+        await query.message.reply_text("<b>4/4</b> Напиши новый источник.", parse_mode="HTML")
         return CONTACT_CUSTOM_SOURCE
 
     sources = context.user_data.get("contact_sources") or []
@@ -317,7 +319,7 @@ async def _ask_contact_segment(message, context: ContextTypes.DEFAULT_TYPE) -> i
     context.user_data["contact_segments"] = options["segments"]
     buttons = [[InlineKeyboardButton(item, callback_data=f"contact_segment:{index}")] for index, item in enumerate(options["segments"])]
     buttons.append([InlineKeyboardButton("➕ Новый сегмент", callback_data="contact_segment:new")])
-    await message.reply_text("Выбери сегмент:", reply_markup=InlineKeyboardMarkup(buttons))
+    await message.reply_text("<b>3/4</b> Выбери сегмент:", parse_mode="HTML", reply_markup=InlineKeyboardMarkup(buttons))
     return CONTACT_SEGMENT
 
 
@@ -331,7 +333,7 @@ async def _ask_contact_source(message, context: ContextTypes.DEFAULT_TYPE) -> in
     context.user_data["contact_sources"] = options["sources"]
     buttons = [[InlineKeyboardButton(item, callback_data=f"contact_source:{index}")] for index, item in enumerate(options["sources"])]
     buttons.append([InlineKeyboardButton("➕ Новый источник", callback_data="contact_source:new")])
-    await message.reply_text("Выбери источник:", reply_markup=InlineKeyboardMarkup(buttons))
+    await message.reply_text("<b>4/4</b> Выбери источник:", parse_mode="HTML", reply_markup=InlineKeyboardMarkup(buttons))
     return CONTACT_SOURCE
 
 
