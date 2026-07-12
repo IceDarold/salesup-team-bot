@@ -25,14 +25,14 @@ class SalesUpAgent:
         self.timeout = int(os.getenv("AGENT_TIMEOUT", "60"))
         self.catalog = ToolCatalog()
 
-    async def run(self, *, text: str, member: dict, is_group: bool) -> AgentRunResult:
+    async def run(self, *, text: str, member: dict, is_group: bool, telegram_service=None) -> AgentRunResult:
         if not self.api_key:
             return AgentRunResult("Агент пока не настроен: не задан AGENT_API_KEY или INSIGHTS_API_KEY.")
 
         from openai import OpenAI
 
         client = OpenAI(base_url=self.base_url, api_key=self.api_key, timeout=self.timeout)
-        tool_context = AgentToolContext(member=member, is_group=is_group)
+        tool_context = AgentToolContext(member=member, is_group=is_group, telegram_service=telegram_service)
         active_toolsets = {"core"}
         messages: list[dict[str, Any]] = [
             {"role": "system", "content": _system_prompt(is_group, self.catalog.list_toolsets())},
@@ -117,6 +117,9 @@ def _prepared_action_text(action: dict[str, Any]) -> str:
             f"Текущий статус: {action.get('current_status')}\n"
             f"Новый статус: {payload.get('status')}"
         )
+    if action.get("kind") == "send_telegram_message":
+        payload = action.get("payload") or {}
+        return f"Отправить сообщение от твоего имени получателю {payload.get('recipient')}?\n\n{payload.get('text')}"
     return "Подтвердить подготовленное действие?"
 
 

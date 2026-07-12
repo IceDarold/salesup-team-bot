@@ -33,6 +33,18 @@ read-only access; creating or changing a contact remains an explicit bot flow.
 It uses `AGENT_API_KEY`, `AGENT_BASE_URL`, and `AGENT_MODEL` when set, otherwise
 falls back to the existing `INSIGHTS_*` settings.
 
+## Personal Telegram accounts
+
+`/telegram` lets a team member connect their personal Telegram account by QR code.
+The encrypted session is stored separately for that Telegram user. The agent may
+prepare an outgoing message, but sends it only after the account owner presses
+the confirmation button.
+
+Set `TELEGRAM_SESSION_ENCRYPTION_KEY` to a Fernet key. `TELEGRAM_API_ID` and
+`TELEGRAM_API_HASH` are also required. For Telegram accounts protected by 2FA,
+configure `TELEGRAM_2FA_WEB_BASE_URL` as a public HTTPS URL and proxy
+`/telegram/2fa/*` to the local callback server on port `8094`.
+
 ## Setup
 
 ```bash

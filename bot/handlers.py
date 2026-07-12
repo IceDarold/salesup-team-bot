@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import html
 import ipaddress
+import io
 import json
 import logging
 import os
@@ -25,6 +26,7 @@ from telegram.ext import ContextTypes, ConversationHandler
 from bot.access import get_notion_member
 from bot.agent import SalesUpAgent
 from bot.agent_tools import execute_prepared_action
+from bot.telegram_user import TelegramUserError
 from notion_store import (
     create_contact,
     get_contact_form_options,
@@ -199,7 +201,6 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             "Не удалось получить статистику из Notion. Попробуй ещё раз чуть позже."
         )
         return
-
     title = "Команда SalesUp" if is_group else (member or {}).get("name") or "твоя статистика"
     today = data["today"]
     overall = data["all"]
@@ -233,6 +234,7 @@ async def agent_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     if not member:
         await message.reply_text("Не нашёл тебя в базе Team Members.")
         return
+    member = {**member, "telegram_user_id": update.effective_user.id}
 
     progress = await message.reply_text("Думаю…")
     chat = update.effective_chat
@@ -241,6 +243,7 @@ async def agent_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             text=text,
             member=member,
             is_group=bool(chat and chat.type != "private"),
+            telegram_service=context.application.bot_data.get("telegram_user_service"),
         )
     except Exception:
         logger.exception("SalesUp agent failed")
@@ -267,6 +270,57 @@ async def agent_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         )
         return
     await progress.edit_text(result.text[:4000])
+
+
+async def telegram_account(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    service = context.application.bot_data["telegram_user_service"]
+    user_id = update.effective_user.id
+    status = service.status(user_id)
+    if not status["configured"]:
+        await update.effective_message.reply_text(
+            "Подключение личного Telegram ещё не настроено на сервере. Нужны API ID, API Hash и ключ шифрования сессий."
+        )
+        return
+    if status["connected"]:
+        name = status["display_name"] or (f"@{status['username']}" if status["username"] else "аккаунт")
+        await update.effective_message.reply_text(f"Личный Telegram уже подключён: {name}.")
+        return
+    try:
+        login_url = await service.begin_qr_login(user_id)
+    except TelegramUserError as exc:
+        await update.effective_message.reply_text(f"Не удалось начать подключение: {exc}")
+        return
+
+    import qrcode
+
+    image = qrcode.make(login_url)
+    buffer = io.BytesIO()
+    buffer.name = "telegram-login.png"
+    image.save(buffer, format="PNG")
+    buffer.seek(0)
+    await update.effective_message.reply_photo(
+        photo=buffer,
+        caption="Открой Telegram → Настройки → Устройства → Подключить устройство и отсканируй QR-код. Жду до 90 секунд.",
+    )
+    asyncio.create_task(_finish_telegram_login(service, user_id, update.effective_message))
+
+
+async def _finish_telegram_login(service, user_id: int, message) -> None:
+    try:
+        result = await service.complete_qr_login(user_id)
+    except TelegramUserError as exc:
+        await message.reply_text(f"Подключение не завершено: {exc}")
+        return
+    if result.get("requires_2fa"):
+        await message.reply_text(
+            "На аккаунте включена двухэтапная аутентификация. Открой защищённую ссылку и введи пароль:\n"
+            f"{result['url']}"
+        )
+        return
+    name = result.get("display_name") or (f"@{result.get('username')}" if result.get("username") else "аккаунт")
+    await message.reply_text(
+        f"Готово — личный Telegram подключён: {name}. Агент сможет предложить сообщение и отправить его только после твоего подтверждения."
+    )
 
 
 async def agent_action_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -301,14 +355,16 @@ async def agent_action_callback(update: Update, context: ContextTypes.DEFAULT_TY
 
     await query.edit_message_text("Сохраняю в Notion…")
     try:
-        url = await asyncio.to_thread(execute_prepared_action, action)
+        url = await execute_prepared_action(action, context.application.bot_data.get("telegram_user_service"))
     except Exception:
         logger.exception("Unable to execute confirmed agent action")
         await query.edit_message_text("Не удалось выполнить действие в Notion. Ничего не изменено.")
         return
 
     context.user_data.pop(AGENT_PREPARED_ACTION_KEY, None)
-    if action.get("kind") == "update_contact_status":
+    if action.get("kind") == "send_telegram_message":
+        text = "Готово — сообщение отправлено от твоего имени."
+    elif action.get("kind") == "update_contact_status":
         text = "Готово — статус контакта обновлён в Notion."
     else:
         text = "Готово — контакт добавлен в Notion со статусом «Новый»."

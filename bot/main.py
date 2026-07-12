@@ -37,6 +37,8 @@ def load_dotenv() -> None:
 load_dotenv()
 
 from bot.access import admin_required, init_access_db, member_required  # noqa: E402
+from bot.telegram_user import TelegramUserService  # noqa: E402
+from bot.telegram_web import TelegramTwoFactorServer  # noqa: E402
 from bot.handlers import (  # noqa: E402
     ARTIFACT_DECISION,
     ARCHIVE_DECISION,
@@ -110,6 +112,7 @@ from bot.handlers import (  # noqa: E402
     start,
     stats,
     summary_chat_status,
+    telegram_account,
     choose_summary_chat,
 )
 
@@ -133,6 +136,7 @@ COMMANDS = [
     BotCommand("add_contact", "Добавить контакт"),
     BotCommand("transcript", "Только транскрипт в новый Google Doc"),
     BotCommand("stats", "Статистика по контактам"),
+    BotCommand("telegram", "Подключить личный Telegram"),
     BotCommand("help", "Помощь"),
     BotCommand("info", "Статус"),
     BotCommand("cancel", "Отменить интервью"),
@@ -158,6 +162,7 @@ def main() -> None:
         .token(token)
         .persistence(persistence)
         .post_init(setup_commands)
+        .post_shutdown(shutdown)
         .read_timeout(TELEGRAM_READ_TIMEOUT)
         .write_timeout(TELEGRAM_WRITE_TIMEOUT)
         .connect_timeout(TELEGRAM_CONNECT_TIMEOUT)
@@ -176,6 +181,7 @@ def main() -> None:
         logger.info("Using local Telegram Bot API server: %s", base_url)
 
     app = builder.build()
+    app.bot_data["telegram_user_service"] = TelegramUserService()
     app.add_handler(
         ConversationHandler(
             entry_points=[
@@ -290,6 +296,7 @@ def main() -> None:
     app.add_handler(CommandHandler(["help", "about"], member_required(help_cmd)))
     app.add_handler(CommandHandler("info", member_required(info)))
     app.add_handler(CommandHandler("stats", member_required(stats)))
+    app.add_handler(CommandHandler("telegram", member_required(telegram_account)))
     app.add_handler(CommandHandler("add_member", admin_required(add_member_cmd)))
     app.add_handler(CommandHandler("members", admin_required(members_cmd)))
     app.add_handler(CommandHandler("remove_member", admin_required(remove_member_cmd)))
@@ -321,6 +328,21 @@ async def setup_commands(app: Application) -> None:
         await app.bot.set_chat_menu_button(menu_button=MenuButtonCommands())
     except Exception as e:
         logger.warning("Failed to set commands menu: %s", e)
+    server = TelegramTwoFactorServer(app.bot_data["telegram_user_service"])
+    app.bot_data["telegram_two_factor_server"] = server
+    try:
+        await server.start()
+    except Exception as e:
+        logger.exception("Failed to start Telegram 2FA server: %s", e)
+
+
+async def shutdown(app: Application) -> None:
+    server = app.bot_data.get("telegram_two_factor_server")
+    if server:
+        await server.stop()
+    service = app.bot_data.get("telegram_user_service")
+    if service:
+        await service.close()
 
 
 if __name__ == "__main__":

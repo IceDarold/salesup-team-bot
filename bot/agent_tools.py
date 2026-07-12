@@ -1,6 +1,7 @@
 """Model-visible SalesUp tools with code-owned safety policies."""
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
@@ -48,6 +49,7 @@ class ToolSpec:
 class AgentToolContext:
     member: dict
     is_group: bool
+    telegram_service: object | None = None
 
     @property
     def scope(self) -> str:
@@ -71,6 +73,7 @@ class ToolCatalog:
     def list_toolsets(self) -> dict[str, str]:
         return {
             "contacts": "поиск контактов и подготовка добавления нового контакта с подтверждением",
+            "telegram": "подготовка отправки сообщения через подключённый личный Telegram с подтверждением",
         }
 
 
@@ -84,14 +87,20 @@ def execute_tool(tool: ToolSpec, context: AgentToolContext, arguments: dict[str,
     return result
 
 
-def execute_prepared_action(action: dict[str, Any]) -> str:
+async def execute_prepared_action(action: dict[str, Any], telegram_service=None) -> str:
     """Run a previously confirmed write action. Never call this from the model loop."""
-    if action.get("kind") != "create_contact":
-        if action.get("kind") == "update_contact_status":
-            result = update_contact_status(**(action.get("payload") or {}))
-            return result.get("url") or ""
-        raise ValueError("Неизвестное подготовленное действие.")
-    return create_contact(**(action.get("payload") or {}))
+    if action.get("kind") == "create_contact":
+        return await asyncio.to_thread(create_contact, **(action.get("payload") or {}))
+    if action.get("kind") == "update_contact_status":
+        result = await asyncio.to_thread(update_contact_status, **(action.get("payload") or {}))
+        return result.get("url") or ""
+    if action.get("kind") == "send_telegram_message":
+        if telegram_service is None:
+            raise ValueError("Подключение личного Telegram недоступно.")
+        payload = action.get("payload") or {}
+        await telegram_service.send_message(payload["telegram_user_id"], payload["recipient"], payload["text"])
+        return ""
+    raise ValueError("Неизвестное подготовленное действие.")
 
 
 def prepared_action_expiry() -> str:
@@ -157,6 +166,27 @@ def _prepare_update_contact_status(context: AgentToolContext, arguments: dict[st
     return {"ok": True, "terminal": True, "prepared_action": action}
 
 
+def _prepare_send_telegram_message(context: AgentToolContext, arguments: dict[str, Any]) -> dict[str, Any]:
+    if context.is_group:
+        return {"ok": False, "error": "Отправлять личные сообщения можно только из личного чата с ботом."}
+    service = context.telegram_service
+    if service is None or not service.status(context.member["telegram_user_id"]).get("connected"):
+        return {"ok": False, "error": "Личный Telegram не подключён. Используй /telegram."}
+    recipient = str(arguments.get("recipient") or "").strip()
+    text = str(arguments.get("text") or "").strip()
+    if not recipient or not text:
+        return {"ok": False, "error": "Нужны получатель и текст сообщения."}
+    return {
+        "ok": True,
+        "terminal": True,
+        "prepared_action": {
+            "kind": "send_telegram_message",
+            "payload": {"telegram_user_id": context.member["telegram_user_id"], "recipient": recipient, "text": text},
+            "expires_at": prepared_action_expiry(),
+        },
+    }
+
+
 def _stats_payload(data: dict) -> dict:
     def funnel(item: dict) -> dict:
         return {
@@ -204,6 +234,15 @@ _UPDATE_CONTACT_STATUS_PARAMETERS = {
     "required": ["contact_id", "status"],
     "additionalProperties": False,
 }
+_SEND_TELEGRAM_MESSAGE_PARAMETERS = {
+    "type": "object",
+    "properties": {
+        "recipient": {"type": "string", "description": "@username, номер телефона или ссылка t.me."},
+        "text": {"type": "string", "description": "Готовый текст сообщения."},
+    },
+    "required": ["recipient", "text"],
+    "additionalProperties": False,
+}
 _TOOLS = (
     ToolSpec(
         name="get_contact_stats",
@@ -218,7 +257,7 @@ _TOOLS = (
         description="Подключить специализированный набор инструментов. Доступен набор contacts.",
         parameters={
             "type": "object",
-            "properties": {"toolset": {"type": "string", "enum": ["contacts"]}},
+            "properties": {"toolset": {"type": "string", "enum": ["contacts", "telegram"]}},
             "required": ["toolset"],
             "additionalProperties": False,
         },
@@ -249,5 +288,13 @@ _TOOLS = (
         progress_label="Готовлю смену статуса…",
         execute=_prepare_update_contact_status,
         policy=ToolPolicy(toolset="contacts", risk="write", confirmation="required"),
+    ),
+    ToolSpec(
+        name="prepare_send_telegram_message",
+        description="Подготовить отправку сообщения от имени пользователя через его подключённый личный Telegram. Отправка произойдёт только после подтверждения.",
+        parameters=_SEND_TELEGRAM_MESSAGE_PARAMETERS,
+        progress_label="Готовлю сообщение…",
+        execute=_prepare_send_telegram_message,
+        policy=ToolPolicy(toolset="telegram", risk="write", confirmation="required"),
     ),
 )
