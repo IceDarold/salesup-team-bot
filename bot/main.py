@@ -593,7 +593,9 @@ async def followup_suggestions_job(context) -> None:
                     continue
                 # Only contacts without an existing chain are eligible. This avoids
                 # adding three more touches to a manually planned sequence.
-                if active or not _new_enough_contact(contact):
+                # Outreach follows research: without a canonical research link there
+                # is no evidence base for a safe, personalized sequence.
+                if active or not _new_enough_contact(contact) or not contact.get("research_url"):
                     continue
                 recipient = _followup_recipient(contact)
                 if not recipient or store.has_suggestion(contact_id, user_id):
