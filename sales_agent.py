@@ -11,11 +11,25 @@ _usage_tracker: ContextVar[dict | None] = ContextVar("research_usage_tracker", d
 
 
 def start_usage_tracking() -> object:
-    return _usage_tracker.set({"input_tokens": 0, "output_tokens": 0, "total_tokens": 0, "calls": 0})
+    return _usage_tracker.set({
+        "input_tokens": 0,
+        "cached_input_tokens": 0,
+        "output_tokens": 0,
+        "total_tokens": 0,
+        "web_search_calls": 0,
+        "calls": 0,
+    })
 
 
 def usage_snapshot() -> dict:
-    return dict(_usage_tracker.get() or {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0, "calls": 0})
+    return dict(_usage_tracker.get() or {
+        "input_tokens": 0,
+        "cached_input_tokens": 0,
+        "output_tokens": 0,
+        "total_tokens": 0,
+        "web_search_calls": 0,
+        "calls": 0,
+    })
 
 
 def stop_usage_tracking(token: object) -> None:
@@ -29,6 +43,14 @@ def _record_usage(response) -> None:
         return
     for key in ("input_tokens", "output_tokens", "total_tokens"):
         tracker[key] += int(getattr(usage, key, 0) or 0)
+    input_details = getattr(usage, "input_tokens_details", None)
+    tracker["cached_input_tokens"] += int(getattr(input_details, "cached_tokens", 0) or 0)
+    for item in getattr(response, "output", []) or []:
+        item_type = getattr(item, "type", None)
+        if item_type is None and isinstance(item, dict):
+            item_type = item.get("type")
+        if item_type == "web_search_call":
+            tracker["web_search_calls"] += 1
     tracker["calls"] += 1
 
 

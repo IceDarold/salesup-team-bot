@@ -142,12 +142,27 @@ def _clarification_request(job: dict, report: dict) -> str:
 
 
 def _usage_line(usage: dict, seconds: float) -> str:
-    input_tokens, output_tokens = int(usage.get("input_tokens", 0)), int(usage.get("output_tokens", 0))
+    input_tokens = int(usage.get("input_tokens", 0))
+    cached_input_tokens = min(input_tokens, int(usage.get("cached_input_tokens", 0)))
+    output_tokens = int(usage.get("output_tokens", 0))
+    web_search_calls = int(usage.get("web_search_calls", 0))
     in_rate = float(os.getenv("RESEARCH_INPUT_USD_PER_M_TOKENS", "0") or 0)
+    cached_in_rate = float(os.getenv("RESEARCH_CACHED_INPUT_USD_PER_M_TOKENS", "0") or 0)
     out_rate = float(os.getenv("RESEARCH_OUTPUT_USD_PER_M_TOKENS", "0") or 0)
-    cost = input_tokens / 1_000_000 * in_rate + output_tokens / 1_000_000 * out_rate
-    cost_text = f"${cost:.4f}" if in_rate or out_rate else "не настроена"
-    return f"Время: {seconds:.0f} сек. · токены: {input_tokens:,} input / {output_tokens:,} output · стоимость: {cost_text}"
+    web_search_rate = float(os.getenv("RESEARCH_WEB_SEARCH_USD_PER_CALL", "0") or 0)
+    cost = (
+        (input_tokens - cached_input_tokens) / 1_000_000 * in_rate
+        + cached_input_tokens / 1_000_000 * cached_in_rate
+        + output_tokens / 1_000_000 * out_rate
+        + web_search_calls * web_search_rate
+    )
+    configured = any((in_rate, cached_in_rate, out_rate, web_search_rate))
+    cost_text = f"${cost:.4f}" if configured else "не настроена"
+    return (
+        f"Время: {seconds:.0f} сек. · токены: {input_tokens:,} input "
+        f"({cached_input_tokens:,} cached) / {output_tokens:,} output · "
+        f"web search: {web_search_calls} · стоимость: {cost_text}"
+    )
 
 
 def run_job(store: ResearchJobStore, job: dict) -> None:
