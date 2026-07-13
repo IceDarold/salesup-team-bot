@@ -125,6 +125,22 @@ def _needs_more_context(report: dict, sources: list[dict]) -> bool:
     return not facts and not signals
 
 
+def _clarification_request(job: dict, report: dict) -> str:
+    """Turn evidence gaps into a short, actionable human question."""
+    gaps = [str(item).strip() for item in (report.get("gaps") or []) if str(item).strip()][:2]
+    known = str(job.get("request") or "")
+    hints = []
+    if "сайт компании: не указан" in known:
+        hints.append("сайт компании")
+    if "вакансия/триггер: не указан" in known:
+        hints.append("ссылку на вакансию или иной триггер")
+    if "Компания: не указана" in known:
+        hints.append("точное название компании или город")
+    requested = ", ".join(hints) or "сайт, вакансию, ссылку на компанию или пару слов о бизнесе"
+    gap_text = f" Не удалось проверить: {'; '.join(gaps)}." if gaps else ""
+    return f"Я уже попробовал поиск по доступным данным, включая имя контакта.{gap_text} Пришли, пожалуйста, {requested} — и я продолжу тот же research."
+
+
 def run_job(store: ResearchJobStore, job: dict) -> None:
     job_id = str(job["id"])
     deadline = datetime.now(timezone.utc) + timedelta(minutes=int(job["max_minutes"]))
@@ -169,7 +185,7 @@ def run_job(store: ResearchJobStore, job: dict) -> None:
                          detail="Поиск выполнен, но недостаточно данных, чтобы надёжно продолжить.",
                          report=json.dumps(report, ensure_ascii=False), source_count=len(sources), release_lease=True)
             buttons = json.dumps({"inline_keyboard": [[{"text": "➕ Добавить данные", "callback_data": f"research_input:provide:{job_id}"}]]})
-            _telegram("sendMessage", {"chat_id": job["chat_id"], "text": "Я уже попробовал найти компанию по всем доступным данным, включая имя контакта, но не смог надёжно установить контекст. Пришли сайт, вакансию, ссылку на компанию или пару слов о ней — продолжу research.", "reply_markup": buttons})
+            _telegram("sendMessage", {"chat_id": job["chat_id"], "text": _clarification_request(job, report), "reply_markup": buttons})
             return
         store.replace_evidence(job_id, sources, claims)
         plan = _outreach_plan(report, sources, claims, qualification)
