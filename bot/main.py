@@ -466,7 +466,7 @@ async def scheduled_messages_job(context) -> None:
     for item in due:
         token = str(item["token"])
         try:
-            when = datetime.fromisoformat(str(item["scheduled_at"])).astimezone(ZoneInfo(os.getenv("SCHEDULED_MESSAGES_TIMEZONE", "Asia/Tehran")))
+            when = datetime.fromisoformat(str(item["scheduled_at"])).astimezone(ZoneInfo(os.getenv("SCHEDULED_MESSAGES_TIMEZONE", "Europe/Moscow")))
             text = (
                 f"<b>Время отправки пришло</b>\n\n"
                 f"Контакт: <code>{html.escape(str(item['recipient']))}</code>\n"

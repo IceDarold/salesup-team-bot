@@ -93,7 +93,7 @@ systemd service processes queued jobs and resumes them after a bot restart.
 ## Scheduled personal Telegram messages
 
 Use `/schedule_message` in a private chat. The bot asks for a recipient, message,
-and date/time in `SCHEDULED_MESSAGES_TIMEZONE` (default `Asia/Tehran`). At the
+and date/time in `SCHEDULED_MESSAGES_TIMEZONE` (default `Europe/Moscow`). At the
 scheduled time it asks for a final confirmation before sending through the linked
 personal Telegram account. Use `/scheduled_messages` to inspect, edit, or cancel
 future messages. The due-message check runs every 30 seconds by default.

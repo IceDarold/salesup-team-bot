@@ -64,7 +64,7 @@ STATUS_SUGGESTION_PREFIX = "status_suggestion:"
 RESEARCH_PREFIX = "research:"
 RESEARCH_STORE = ResearchJobStore()
 SCHEDULED_PREFIX = "scheduled:"
-SCHEDULED_TIMEZONE = os.getenv("SCHEDULED_MESSAGES_TIMEZONE", "Asia/Tehran")
+SCHEDULED_TIMEZONE = os.getenv("SCHEDULED_MESSAGES_TIMEZONE", "Europe/Moscow")
 
 (
     NAME,
@@ -574,7 +574,7 @@ def _scheduled_timezone() -> ZoneInfo:
     try:
         return ZoneInfo(SCHEDULED_TIMEZONE)
     except Exception:
-        return ZoneInfo("Asia/Tehran")
+        return ZoneInfo("Europe/Moscow")
 
 
 def _parse_scheduled_time(value: str) -> datetime:
