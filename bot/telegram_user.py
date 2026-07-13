@@ -88,6 +88,16 @@ class TelegramUserService:
                 expected_status TEXT NOT NULL, suggested_status TEXT NOT NULL, reason TEXT NOT NULL,
                 evidence TEXT NOT NULL, created_at TEXT NOT NULL, decided_at TEXT)"""
             )
+            self._db.execute(
+                """CREATE TABLE IF NOT EXISTS telegram_scheduled_messages (
+                token TEXT PRIMARY KEY, telegram_user_id INTEGER NOT NULL, recipient TEXT NOT NULL,
+                text TEXT NOT NULL, scheduled_at TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'scheduled',
+                confirmation_requested_at TEXT, sent_at TEXT, telegram_message_id INTEGER,
+                last_error TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL)"""
+            )
+            self._db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_scheduled_messages_due ON telegram_scheduled_messages(status, scheduled_at)"
+            )
 
     @property
     def configured(self) -> bool:
@@ -295,6 +305,109 @@ class TelegramUserService:
         async with self._client(telegram_user_id) as client:
             message = await client.send_message(_recipient(recipient), text.strip())
         return int(message.id)
+
+    def create_scheduled_message(self, telegram_user_id: int, recipient: str, text: str, scheduled_at: datetime) -> dict:
+        token = secrets.token_urlsafe(8)
+        now = datetime.now(timezone.utc).isoformat()
+        with self._lock, self._db:
+            self._db.execute(
+                """INSERT INTO telegram_scheduled_messages
+                (token, telegram_user_id, recipient, text, scheduled_at, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (token, telegram_user_id, recipient.strip(), text.strip(), scheduled_at.astimezone(timezone.utc).isoformat(), now, now),
+            )
+        return self.get_scheduled_message(token, telegram_user_id) or {}
+
+    def get_scheduled_message(self, token: str, telegram_user_id: int | None = None) -> dict | None:
+        query = "SELECT * FROM telegram_scheduled_messages WHERE token=?"
+        params: tuple = (token,)
+        if telegram_user_id is not None:
+            query += " AND telegram_user_id=?"
+            params = (token, telegram_user_id)
+        with self._lock:
+            row = self._db.execute(query, params).fetchone()
+        return dict(row) if row else None
+
+    def list_scheduled_messages(self, telegram_user_id: int, limit: int = 30) -> list[dict]:
+        with self._lock:
+            rows = self._db.execute(
+                """SELECT * FROM telegram_scheduled_messages WHERE telegram_user_id=?
+                AND status IN ('scheduled','awaiting_confirmation','failed','sending')
+                ORDER BY scheduled_at LIMIT ?""", (telegram_user_id, max(1, min(limit, 100))),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def update_scheduled_message(self, token: str, telegram_user_id: int, **values) -> dict | None:
+        allowed = {"recipient", "text", "scheduled_at"}
+        values = {key: value for key, value in values.items() if key in allowed and value is not None}
+        if not values:
+            return self.get_scheduled_message(token, telegram_user_id)
+        values["updated_at"] = datetime.now(timezone.utc).isoformat()
+        if "scheduled_at" in values and isinstance(values["scheduled_at"], datetime):
+            values["scheduled_at"] = values["scheduled_at"].astimezone(timezone.utc).isoformat()
+        assignments = ", ".join(f"{key}=?" for key in values)
+        with self._lock, self._db:
+            self._db.execute(
+                f"UPDATE telegram_scheduled_messages SET {assignments}, status='scheduled', confirmation_requested_at=NULL, last_error='' "
+                "WHERE token=? AND telegram_user_id=? AND status IN ('scheduled','awaiting_confirmation','failed')",
+                (*values.values(), token, telegram_user_id),
+            )
+        return self.get_scheduled_message(token, telegram_user_id)
+
+    def cancel_scheduled_message(self, token: str, telegram_user_id: int) -> bool:
+        with self._lock, self._db:
+            result = self._db.execute(
+                "UPDATE telegram_scheduled_messages SET status='cancelled', updated_at=? WHERE token=? AND telegram_user_id=? AND status IN ('scheduled','awaiting_confirmation','failed')",
+                (datetime.now(timezone.utc).isoformat(), token, telegram_user_id),
+            )
+        return bool(result.rowcount)
+
+    def claim_due_scheduled_messages(self) -> list[dict]:
+        now = datetime.now(timezone.utc).isoformat()
+        with self._lock, self._db:
+            rows = self._db.execute(
+                "SELECT * FROM telegram_scheduled_messages WHERE status='scheduled' AND scheduled_at <= ? ORDER BY scheduled_at",
+                (now,),
+            ).fetchall()
+            tokens = [str(row["token"]) for row in rows]
+            if tokens:
+                self._db.executemany(
+                    "UPDATE telegram_scheduled_messages SET status='awaiting_confirmation', confirmation_requested_at=?, updated_at=? WHERE token=? AND status='scheduled'",
+                    [(now, now, token) for token in tokens],
+                )
+        return [self.get_scheduled_message(token) or dict(row) for token, row in zip(tokens, rows)]
+
+    def mark_scheduled_message_sent(self, token: str, telegram_user_id: int, message_id: int) -> bool:
+        now = datetime.now(timezone.utc).isoformat()
+        with self._lock, self._db:
+            result = self._db.execute(
+                "UPDATE telegram_scheduled_messages SET status='sent', sent_at=?, telegram_message_id=?, updated_at=? WHERE token=? AND telegram_user_id=? AND status='sending'",
+                (now, message_id, now, token, telegram_user_id),
+            )
+        return bool(result.rowcount)
+
+    def begin_scheduled_message_send(self, token: str, telegram_user_id: int) -> bool:
+        with self._lock, self._db:
+            result = self._db.execute(
+                "UPDATE telegram_scheduled_messages SET status='sending', updated_at=? WHERE token=? AND telegram_user_id=? AND status='awaiting_confirmation'",
+                (datetime.now(timezone.utc).isoformat(), token, telegram_user_id),
+            )
+        return bool(result.rowcount)
+
+    def restore_scheduled_message_confirmation(self, token: str, telegram_user_id: int, error: str) -> None:
+        with self._lock, self._db:
+            self._db.execute(
+                "UPDATE telegram_scheduled_messages SET status='awaiting_confirmation', last_error=?, updated_at=? WHERE token=? AND telegram_user_id=? AND status='sending'",
+                (error[:1000], datetime.now(timezone.utc).isoformat(), token, telegram_user_id),
+            )
+
+    def decline_scheduled_message(self, token: str, telegram_user_id: int) -> bool:
+        with self._lock, self._db:
+            result = self._db.execute(
+                "UPDATE telegram_scheduled_messages SET status='declined', updated_at=? WHERE token=? AND telegram_user_id=? AND status='awaiting_confirmation'",
+                (datetime.now(timezone.utc).isoformat(), token, telegram_user_id),
+            )
+        return bool(result.rowcount)
 
     async def close(self) -> None:
         for user_id in list(self._pending):

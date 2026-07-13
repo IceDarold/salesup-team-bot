@@ -1,5 +1,6 @@
 """Telegram bot entry point for interview transcription."""
 import asyncio
+import html
 import logging
 import os
 import sys
@@ -66,6 +67,10 @@ from bot.handlers import (  # noqa: E402
     NAME,
     PARTS_COUNT,
     ROLE,
+    SCHEDULE_EDIT_VALUE,
+    SCHEDULE_RECIPIENT,
+    SCHEDULE_TEXT,
+    SCHEDULE_TIME,
     SEGMENT,
     SUBJECT,
     add_member_cmd,
@@ -118,7 +123,20 @@ from bot.handlers import (  # noqa: E402
     remember_group,
     research_callback,
     research_command,
+    research_cancel_command,
     research_document_handler,
+    research_refine_command,
+    research_report_command,
+    research_status_command,
+    schedule_message_command,
+    scheduled_callback,
+    scheduled_cancel_flow,
+    scheduled_edit_entry,
+    scheduled_edit_value,
+    scheduled_messages_command,
+    scheduled_recipient,
+    scheduled_text,
+    scheduled_time,
     set_summary_chat,
     start,
     stats,
@@ -164,6 +182,12 @@ COMMANDS = [
     BotCommand("telegram_delete_all", "Удалить все архивы"),
     BotCommand("research", "Пришли PDF с ресёрчем"),
     BotCommand("company_research", "Глубоко изучить компанию"),
+    BotCommand("research_status", "Статус глубокого research"),
+    BotCommand("research_cancel", "Отменить глубокий research"),
+    BotCommand("research_report", "Открыть отчёт research"),
+    BotCommand("research_refine", "Уточнить завершённый research"),
+    BotCommand("schedule_message", "Запланировать личное сообщение"),
+    BotCommand("scheduled_messages", "Запланированные сообщения"),
     BotCommand("help", "Помощь"),
     BotCommand("info", "Статус"),
     BotCommand("cancel", "Отменить интервью"),
@@ -299,6 +323,23 @@ def main() -> None:
     )
     app.add_handler(
         ConversationHandler(
+            entry_points=[
+                CommandHandler("schedule_message", member_required(schedule_message_command)),
+                CallbackQueryHandler(member_required(scheduled_edit_entry), pattern=r"^scheduled:edit:(time|recipient|text):"),
+            ],
+            states={
+                SCHEDULE_RECIPIENT: [MessageHandler(filters.TEXT & ~filters.COMMAND, member_required(scheduled_recipient))],
+                SCHEDULE_TEXT: [MessageHandler(filters.TEXT & ~filters.COMMAND, member_required(scheduled_text))],
+                SCHEDULE_TIME: [MessageHandler(filters.TEXT & ~filters.COMMAND, member_required(scheduled_time))],
+                SCHEDULE_EDIT_VALUE: [MessageHandler(filters.TEXT & ~filters.COMMAND, member_required(scheduled_edit_value))],
+            },
+            fallbacks=[CommandHandler("cancel", member_required(scheduled_cancel_flow))],
+            name="scheduled_message_flow",
+            persistent=True,
+        )
+    )
+    app.add_handler(
+        ConversationHandler(
             entry_points=[CommandHandler("add_contact", member_required(add_contact))],
             states={
                 CONTACT_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, member_required(contact_name))],
@@ -329,6 +370,11 @@ def main() -> None:
     app.add_handler(CommandHandler("telegram_delete_all", member_required(telegram_delete_all)))
     app.add_handler(CommandHandler("research", member_required(research_command)))
     app.add_handler(CommandHandler("company_research", member_required(company_research_command)))
+    app.add_handler(CommandHandler("research_status", member_required(research_status_command)))
+    app.add_handler(CommandHandler("research_cancel", member_required(research_cancel_command)))
+    app.add_handler(CommandHandler("research_report", member_required(research_report_command)))
+    app.add_handler(CommandHandler("research_refine", member_required(research_refine_command)))
+    app.add_handler(CommandHandler("scheduled_messages", member_required(scheduled_messages_command)))
     app.add_handler(CommandHandler("add_member", admin_required(add_member_cmd)))
     app.add_handler(CommandHandler("members", admin_required(members_cmd)))
     app.add_handler(CommandHandler("remove_member", admin_required(remove_member_cmd)))
@@ -339,12 +385,14 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(member_required(telegram_archive_callback), pattern=r"^archive:"))
     app.add_handler(CallbackQueryHandler(member_required(contact_status_suggestion_callback), pattern=r"^status_suggestion:"))
     app.add_handler(CallbackQueryHandler(member_required(research_callback), pattern=r"^research:"))
+    app.add_handler(CallbackQueryHandler(member_required(scheduled_callback), pattern=r"^scheduled:"))
     app.add_handler(ChatMemberHandler(remember_bot_chat_member, ChatMemberHandler.MY_CHAT_MEMBER))
     app.add_handler(MessageHandler(filters.ChatType.GROUPS, remember_group), group=10)
     app.add_handler(MessageHandler(filters.Document.PDF | filters.Document.FileExtension("docx"), member_required(research_document_handler)), group=1)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, member_required(agent_message)))
     schedule_next_step_reminders(app)
     schedule_conversation_archives(app)
+    schedule_scheduled_messages(app)
 
     logger.info("Interview bot starting")
     app.run_polling()
@@ -403,6 +451,35 @@ def schedule_next_step_reminders(app: Application) -> None:
 def schedule_conversation_archives(app: Application) -> None:
     interval = max(60, int(os.getenv("TELEGRAM_ARCHIVE_SYNC_SECONDS", "60")))
     app.job_queue.run_repeating(conversation_archives_job, interval=interval, first=15, name="conversation_archives")
+
+
+def schedule_scheduled_messages(app: Application) -> None:
+    interval = max(15, int(os.getenv("SCHEDULED_MESSAGE_CHECK_SECONDS", "30")))
+    app.job_queue.run_repeating(scheduled_messages_job, interval=interval, first=10, name="scheduled_messages")
+
+
+async def scheduled_messages_job(context) -> None:
+    service = getattr(context.application, "_telegram_user_service", None)
+    if service is None:
+        return
+    due = await asyncio.to_thread(service.claim_due_scheduled_messages)
+    for item in due:
+        token = str(item["token"])
+        try:
+            when = datetime.fromisoformat(str(item["scheduled_at"])).astimezone(ZoneInfo(os.getenv("SCHEDULED_MESSAGES_TIMEZONE", "Asia/Tehran")))
+            text = (
+                f"<b>Время отправки пришло</b>\n\n"
+                f"Контакт: <code>{html.escape(str(item['recipient']))}</code>\n"
+                f"Запланировано: <b>{when.strftime('%d.%m.%Y %H:%M')}</b>\n\n"
+                f"Сообщение:\n{html.escape(str(item['text'])[:3000])}\n\n"
+                "Отправить через ваш личный Telegram?"
+            )
+            await context.bot.send_message(
+                chat_id=int(item["telegram_user_id"]), text=text, parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("✅ Отправить", callback_data=f"scheduled:send:{token}"), InlineKeyboardButton("Не отправлять", callback_data=f"scheduled:decline:{token}")], [InlineKeyboardButton("Изменить", callback_data=f"scheduled:open:{token}")]]),
+            )
+        except Exception:
+            logger.exception("Unable to request confirmation for scheduled message %s", token)
 
 
 async def conversation_archives_job(context) -> None:

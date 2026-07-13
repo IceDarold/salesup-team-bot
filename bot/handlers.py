@@ -20,6 +20,7 @@ import urllib.request
 from contextlib import suppress
 from datetime import datetime, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes, ConversationHandler
@@ -38,8 +39,8 @@ from notion_store import (
     list_team_members,
 )
 from transcriber import TRANSCRIBE_MODEL, transcribe
-from sales_agent import research_company_brief, research_document
-from google_docs import create_company_research_tab
+from sales_agent import research_document
+from research_jobs import ResearchJobStore
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +62,9 @@ AGENT_ACTION_PREFIX = "agent_action:"
 ARCHIVE_CALLBACK_PREFIX = "archive:"
 STATUS_SUGGESTION_PREFIX = "status_suggestion:"
 RESEARCH_PREFIX = "research:"
+RESEARCH_STORE = ResearchJobStore()
+SCHEDULED_PREFIX = "scheduled:"
+SCHEDULED_TIMEZONE = os.getenv("SCHEDULED_MESSAGES_TIMEZONE", "Asia/Tehran")
 
 (
     NAME,
@@ -89,6 +93,8 @@ RESEARCH_PREFIX = "research:"
     CONTACT_SOURCE,
     CONTACT_CUSTOM_SOURCE,
 ) = range(100, 106)
+
+SCHEDULE_RECIPIENT, SCHEDULE_TEXT, SCHEDULE_TIME, SCHEDULE_EDIT_VALUE = range(300, 304)
 
 SEGMENT_KB = InlineKeyboardMarkup(
     [
@@ -179,6 +185,8 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "1f. /telegram_export <контакт> - обновить архив и получить ссылку\n"
         "1g. /telegram_delete <контакт> - удалить архив контакта\n"
         "1h. /telegram_delete_all - удалить все архивы\n"
+        "1i. /schedule_message - запланировать личное Telegram-сообщение\n"
+        "1j. /scheduled_messages - список и изменение запланированных сообщений\n"
         "2. Заполнить короткую анкету\n"
         "3. Отправить voice, audio, video, файл с аудио/видео или прямую ссылку\n"
         "4. Бот пришлёт ссылку на инсайты в Telegra.ph\n"
@@ -486,23 +494,283 @@ async def company_research_command(update: Update, context: ContextTypes.DEFAULT
     if not request:
         await update.effective_message.reply_text("Использование: /company_research <ссылка на вакансию, сайт компании и любые вводные свободным текстом>")
         return
-    progress = await update.effective_message.reply_text("Запускаю глубокое исследование: изучаю компанию, вакансию, людей, рынок и публичные источники. Это займёт несколько минут.")
-    asyncio.create_task(_run_company_research(progress, request))
+    progress = await update.effective_message.reply_text("Создаю задачу глубокого исследования…")
+    job = await asyncio.to_thread(
+        RESEARCH_STORE.create,
+        telegram_user_id=update.effective_user.id,
+        chat_id=update.effective_chat.id,
+        request=request,
+        progress_message_id=progress.message_id,
+    )
+    await progress.edit_text(
+        f"Исследование <code>{job['id']}</code> поставлено в очередь.\n"
+        f"Лимиты: до {job['max_minutes']} минут, {job['max_sources']} источников, {job['max_iterations']} итераций.\n\n"
+        f"/research_status {job['id']} · /research_cancel {job['id']}",
+        parse_mode="HTML",
+    )
 
 
-async def _run_company_research(progress, request: str) -> None:
-    try:
-        report = await asyncio.to_thread(research_company_brief, request)
-        if not report:
-            raise RuntimeError("Research model returned an empty report.")
-        urls = re.findall(r"https?://[^\s]+", request)
-        title = urllib.parse.urlparse(urls[0]).netloc if urls else "Компания"
-        url = await asyncio.to_thread(create_company_research_tab, title, report)
-    except Exception:
-        logger.exception("Company research failed")
-        await progress.edit_text("Не удалось завершить исследование. Проверь доступность OpenAI API и повтори запрос.")
+def _research_job_text(job: dict) -> str:
+    lines = [
+        f"Исследование <code>{html.escape(str(job['id']))}</code>",
+        f"Статус: <b>{html.escape(str(job.get('stage') or job.get('status')))}</b> ({int(job.get('progress') or 0)}%)",
+        f"Источников: {int(job.get('source_count') or 0)} · итераций: {int(job.get('iteration') or 0)}/{int(job.get('max_iterations') or 0)}",
+    ]
+    if job.get("detail"):
+        lines.append(html.escape(str(job["detail"])))
+    if job.get("google_url"):
+        lines.append(f"Отчёт: {html.escape(str(job['google_url']))}")
+    if job.get("error"):
+        lines.append(f"Ошибка: {html.escape(str(job['error'])[:500])}")
+    return "\n".join(lines)
+
+
+async def research_status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not context.args:
+        await update.effective_message.reply_text("Использование: /research_status <ID исследования>")
         return
-    await progress.edit_text(f"Исследование готово. Полный отчёт с источниками: {url}")
+    job = await asyncio.to_thread(RESEARCH_STORE.get, context.args[0], update.effective_user.id)
+    if not job:
+        await update.effective_message.reply_text("Исследование не найдено.")
+        return
+    await update.effective_message.reply_text(_research_job_text(job), parse_mode="HTML")
+
+
+async def research_cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not context.args:
+        await update.effective_message.reply_text("Использование: /research_cancel <ID исследования>")
+        return
+    if await asyncio.to_thread(RESEARCH_STORE.cancel, context.args[0], update.effective_user.id):
+        await update.effective_message.reply_text("Задача отменена. Worker остановится на ближайшей безопасной точке.")
+    else:
+        await update.effective_message.reply_text("Нельзя отменить: задача не найдена или уже завершена.")
+
+
+async def research_report_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not context.args:
+        await update.effective_message.reply_text("Использование: /research_report <ID исследования>")
+        return
+    job = await asyncio.to_thread(RESEARCH_STORE.get, context.args[0], update.effective_user.id)
+    if not job:
+        await update.effective_message.reply_text("Исследование не найдено.")
+    elif job.get("google_url"):
+        await update.effective_message.reply_text(f"Отчёт: {job['google_url']}")
+    else:
+        await update.effective_message.reply_text(_research_job_text(job), parse_mode="HTML")
+
+
+async def research_refine_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if len(context.args) < 2:
+        await update.effective_message.reply_text("Использование: /research_refine <ID> <что дополнительно изучить>")
+        return
+    job_id, refinement = context.args[0], " ".join(context.args[1:]).strip()
+    if await asyncio.to_thread(RESEARCH_STORE.refine, job_id, update.effective_user.id, refinement):
+        await update.effective_message.reply_text(f"Уточнение для {job_id} поставлено в очередь. Будет подготовлен обновлённый отчёт.")
+    else:
+        await update.effective_message.reply_text("Уточнять можно только завершённое, отменённое или завершившееся с ошибкой исследование.")
+
+
+def _scheduled_timezone() -> ZoneInfo:
+    try:
+        return ZoneInfo(SCHEDULED_TIMEZONE)
+    except Exception:
+        return ZoneInfo("Asia/Tehran")
+
+
+def _parse_scheduled_time(value: str) -> datetime:
+    try:
+        when = datetime.strptime(value.strip(), "%d.%m.%Y %H:%M").replace(tzinfo=_scheduled_timezone())
+    except ValueError as exc:
+        raise ValueError(f"Укажи дату в формате ДД.ММ.ГГГГ ЧЧ:ММ ({SCHEDULED_TIMEZONE}).") from exc
+    if when <= datetime.now(_scheduled_timezone()):
+        raise ValueError("Время должно быть в будущем.")
+    return when
+
+
+def _scheduled_card(item: dict, *, confirmation: bool = False) -> str:
+    when = datetime.fromisoformat(str(item["scheduled_at"])).astimezone(_scheduled_timezone())
+    status = {
+        "scheduled": "Запланировано", "awaiting_confirmation": "Ждёт подтверждения",
+        "failed": "Не отправлено", "sending": "Отправляется", "sent": "Отправлено", "declined": "Не отправлять",
+    }.get(str(item.get("status")), str(item.get("status") or "—"))
+    title = "<b>Время отправки пришло</b>" if confirmation else "<b>Запланированное сообщение</b>"
+    return (
+        f"{title}\n\nСтатус: <b>{html.escape(status)}</b>\n"
+        f"Контакт: <code>{html.escape(str(item.get('recipient') or '—'))}</code>\n"
+        f"Время: <b>{when.strftime('%d.%m.%Y %H:%M')}</b> ({html.escape(SCHEDULED_TIMEZONE)})\n\n"
+        f"Сообщение:\n{html.escape(str(item.get('text') or '—')[:3000])}"
+    )
+
+
+def _scheduled_buttons(token: str, *, awaiting_confirmation: bool = False) -> InlineKeyboardMarkup:
+    rows = []
+    if awaiting_confirmation:
+        rows.append([
+            InlineKeyboardButton("✅ Отправить сейчас", callback_data=f"{SCHEDULED_PREFIX}send:{token}"),
+            InlineKeyboardButton("Не отправлять", callback_data=f"{SCHEDULED_PREFIX}decline:{token}"),
+        ])
+    rows.extend([
+        [InlineKeyboardButton("Изменить время", callback_data=f"{SCHEDULED_PREFIX}edit:time:{token}"),
+         InlineKeyboardButton("Изменить контакт", callback_data=f"{SCHEDULED_PREFIX}edit:recipient:{token}")],
+        [InlineKeyboardButton("Изменить сообщение", callback_data=f"{SCHEDULED_PREFIX}edit:text:{token}")],
+        [InlineKeyboardButton("Отменить план", callback_data=f"{SCHEDULED_PREFIX}cancel:{token}"),
+         InlineKeyboardButton("‹ Назад", callback_data=f"{SCHEDULED_PREFIX}back")],
+    ])
+    return InlineKeyboardMarkup(rows)
+
+
+async def schedule_message_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    if update.effective_chat and update.effective_chat.type != "private":
+        await update.effective_message.reply_text("Планировать личные сообщения можно только в личном чате с ботом.")
+        return ConversationHandler.END
+    status = _telegram_user_service(context).status(update.effective_user.id)
+    if not status["connected"]:
+        await update.effective_message.reply_text("Сначала подключи личный Telegram через /telegram.")
+        return ConversationHandler.END
+    context.user_data["scheduled_draft"] = {}
+    await update.effective_message.reply_text("Кому написать? Пришли @username, t.me-ссылку, номер телефона или Telegram ID.")
+    return SCHEDULE_RECIPIENT
+
+
+async def scheduled_recipient(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    recipient = (update.effective_message.text or "").strip()
+    if not recipient:
+        await update.effective_message.reply_text("Укажи получателя текстом.")
+        return SCHEDULE_RECIPIENT
+    context.user_data.setdefault("scheduled_draft", {})["recipient"] = recipient
+    await update.effective_message.reply_text("Теперь пришли текст сообщения.")
+    return SCHEDULE_TEXT
+
+
+async def scheduled_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    text = (update.effective_message.text or "").strip()
+    if not text:
+        await update.effective_message.reply_text("Текст сообщения не должен быть пустым.")
+        return SCHEDULE_TEXT
+    context.user_data.setdefault("scheduled_draft", {})["text"] = text
+    await update.effective_message.reply_text(f"Когда напомнить об отправке? Формат: <code>ДД.ММ.ГГГГ ЧЧ:ММ</code> ({SCHEDULED_TIMEZONE}).", parse_mode="HTML")
+    return SCHEDULE_TIME
+
+
+async def scheduled_time(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    try:
+        when = _parse_scheduled_time(update.effective_message.text or "")
+    except ValueError as exc:
+        await update.effective_message.reply_text(str(exc))
+        return SCHEDULE_TIME
+    draft = context.user_data.pop("scheduled_draft", {})
+    if not draft.get("recipient") or not draft.get("text"):
+        await update.effective_message.reply_text("Черновик потерялся. Начни заново: /schedule_message")
+        return ConversationHandler.END
+    item = _telegram_user_service(context).create_scheduled_message(update.effective_user.id, draft["recipient"], draft["text"], when)
+    await update.effective_message.reply_text(
+        _scheduled_card(item), parse_mode="HTML", reply_markup=_scheduled_buttons(item["token"]),
+    )
+    return ConversationHandler.END
+
+
+async def scheduled_messages_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.effective_chat and update.effective_chat.type != "private":
+        await update.effective_message.reply_text("Список запланированных сообщений доступен только в личном чате.")
+        return
+    items = _telegram_user_service(context).list_scheduled_messages(update.effective_user.id)
+    if not items:
+        await update.effective_message.reply_text("Нет активных запланированных сообщений. Создать: /schedule_message")
+        return
+    buttons = []
+    for item in items:
+        when = datetime.fromisoformat(str(item["scheduled_at"])).astimezone(_scheduled_timezone())
+        label = f"{when.strftime('%d.%m %H:%M')} · {item['recipient']}"
+        buttons.append([InlineKeyboardButton(label[:60], callback_data=f"{SCHEDULED_PREFIX}open:{item['token']}")])
+    await update.effective_message.reply_text("<b>Запланированные сообщения</b>\nВыбери сообщение для просмотра или изменения.", parse_mode="HTML", reply_markup=InlineKeyboardMarkup(buttons))
+
+
+async def scheduled_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+    parts = (query.data or "").split(":")
+    if len(parts) < 2:
+        return
+    action = parts[1]
+    token = parts[-1] if action != "back" else ""
+    service = _telegram_user_service(context)
+    user_id = update.effective_user.id
+    if action == "back":
+        items = service.list_scheduled_messages(user_id)
+        buttons = [[InlineKeyboardButton(f"{datetime.fromisoformat(str(item['scheduled_at'])).astimezone(_scheduled_timezone()).strftime('%d.%m %H:%M')} · {item['recipient']}"[:60], callback_data=f"{SCHEDULED_PREFIX}open:{item['token']}")] for item in items]
+        await query.edit_message_text("<b>Запланированные сообщения</b>\nВыбери сообщение.", parse_mode="HTML", reply_markup=InlineKeyboardMarkup(buttons) if buttons else None)
+        return
+    item = service.get_scheduled_message(token, user_id)
+    if not item:
+        await query.edit_message_text("Сообщение не найдено или больше недоступно.")
+        return
+    if action == "open":
+        await query.edit_message_text(_scheduled_card(item), parse_mode="HTML", reply_markup=_scheduled_buttons(token, awaiting_confirmation=item["status"] == "awaiting_confirmation"))
+    elif action == "cancel":
+        service.cancel_scheduled_message(token, user_id)
+        await query.edit_message_text("Запланированное сообщение отменено.")
+    elif action == "decline":
+        service.decline_scheduled_message(token, user_id)
+        await query.edit_message_text("Понял, это сообщение отправлено не будет.")
+    elif action == "send":
+        if not service.begin_scheduled_message_send(token, user_id):
+            await query.edit_message_text("Это сообщение уже отправляется, отправлено или отменено.")
+            return
+        try:
+            message_id = await service.send_message(user_id, str(item["recipient"]), str(item["text"]))
+            service.mark_scheduled_message_sent(token, user_id, message_id)
+        except Exception as exc:
+            logger.exception("Unable to send scheduled message %s", token)
+            service.restore_scheduled_message_confirmation(token, user_id, str(exc))
+            await query.edit_message_text(f"Не удалось отправить сообщение: {exc}")
+            return
+        await query.edit_message_text("Сообщение отправлено через ваш личный Telegram.")
+
+
+async def scheduled_edit_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    _, _, field, token = (query.data or "").split(":", 3)
+    item = _telegram_user_service(context).get_scheduled_message(token, update.effective_user.id)
+    if not item:
+        await query.edit_message_text("Сообщение не найдено или больше недоступно.")
+        return ConversationHandler.END
+    context.user_data["scheduled_edit"] = {"token": token, "field": field}
+    prompts = {"time": f"Новое время: <code>ДД.ММ.ГГГГ ЧЧ:ММ</code> ({SCHEDULED_TIMEZONE}).", "recipient": "Новый @username, t.me URL, телефон или Telegram ID:", "text": "Новый текст сообщения:"}
+    await query.message.reply_text(prompts[field], parse_mode="HTML")
+    return SCHEDULE_EDIT_VALUE
+
+
+async def scheduled_edit_value(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    edit = context.user_data.pop("scheduled_edit", {})
+    value = (update.effective_message.text or "").strip()
+    if not edit or not value:
+        await update.effective_message.reply_text("Не получилось сохранить изменение. Открой сообщение через /scheduled_messages.")
+        return ConversationHandler.END
+    field = edit.get("field")
+    try:
+        if field == "time":
+            item = _telegram_user_service(context).update_scheduled_message(edit["token"], update.effective_user.id, scheduled_at=_parse_scheduled_time(value))
+        elif field in {"recipient", "text"}:
+            item = _telegram_user_service(context).update_scheduled_message(edit["token"], update.effective_user.id, **{field: value})
+        else:
+            item = None
+    except ValueError as exc:
+        context.user_data["scheduled_edit"] = edit
+        await update.effective_message.reply_text(str(exc))
+        return SCHEDULE_EDIT_VALUE
+    if not item:
+        await update.effective_message.reply_text("Не удалось изменить сообщение: оно уже недоступно.")
+        return ConversationHandler.END
+    await update.effective_message.reply_text(_scheduled_card(item), parse_mode="HTML", reply_markup=_scheduled_buttons(item["token"]))
+    return ConversationHandler.END
+
+
+async def scheduled_cancel_flow(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    context.user_data.pop("scheduled_draft", None)
+    context.user_data.pop("scheduled_edit", None)
+    await update.effective_message.reply_text("Планирование сообщения отменено.")
+    return ConversationHandler.END
 
 
 async def _send_research_candidate(message, token: str, index: int, candidate: dict) -> None:

@@ -31,7 +31,12 @@ jobs:
             cd /opt/salesup-team-bot
             git pull --ff-only origin main
             venv/bin/python3 -m pip install -r requirements.txt
-            venv/bin/python3 -m py_compile bot/main.py bot/handlers.py notion_store.py
+            venv/bin/python3 -m py_compile bot/main.py bot/handlers.py notion_store.py research_jobs.py research_worker.py sales_agent.py
+            install -m 644 systemd/salesup-research-worker.service /etc/systemd/system/salesup-research-worker.service
+            systemctl daemon-reload
+            systemctl enable salesup-research-worker.service
             systemctl restart salesup-team-bot.service
+            systemctl restart salesup-research-worker.service
             systemctl is-active --quiet salesup-team-bot.service
+            systemctl is-active --quiet salesup-research-worker.service
           EOF

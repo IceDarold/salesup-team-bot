@@ -81,9 +81,22 @@ and returns cards with personalized outreach drafts. A message is sent only afte
 the owner presses `Отправить`.
 
 Use `/company_research <URLs and free-text context>` for a source-grounded deep
-company and vacancy analysis. The report covers history, founders, pains with
+company and vacancy analysis. It creates a durable background task rather than
+blocking the bot: planning, iterative web research, an evidence ledger, strategy,
+and an independent source check. The report covers history, founders, pains with
 evidence, automation ideas, stakeholders, sales strategy, and outreach drafts;
-it is saved as a separate tab in `GOOGLE_RESEARCH_DOC_ID`.
+it is saved as a separate tab in `GOOGLE_RESEARCH_DOC_ID`. Use
+`/research_status <ID>`, `/research_cancel <ID>`, `/research_report <ID>`, and
+`/research_refine <ID> <уточнение>` to manage it. The `salesup-research-worker`
+systemd service processes queued jobs and resumes them after a bot restart.
+
+## Scheduled personal Telegram messages
+
+Use `/schedule_message` in a private chat. The bot asks for a recipient, message,
+and date/time in `SCHEDULED_MESSAGES_TIMEZONE` (default `Asia/Tehran`). At the
+scheduled time it asks for a final confirmation before sending through the linked
+personal Telegram account. Use `/scheduled_messages` to inspect, edit, or cancel
+future messages. The due-message check runs every 30 seconds by default.
 
 Set `TELEGRAM_SESSION_ENCRYPTION_KEY` to a Fernet key. `TELEGRAM_API_ID` and
 `TELEGRAM_API_HASH` are also required. For Telegram accounts protected by 2FA,
