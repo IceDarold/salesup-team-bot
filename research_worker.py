@@ -19,6 +19,7 @@ from google_docs import create_company_research_tab
 from research_jobs import ResearchJobStore
 from notion_store import update_contact_research_url
 from sales_agent import deep_company_research
+from outreach import build_outreach_plan, quick_qualify
 
 logging.basicConfig(format="%(asctime)s [%(levelname)s] %(name)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger("research-worker")
@@ -68,7 +69,7 @@ def _title(request: str) -> str:
     return "Компания"
 
 
-def _outreach_plan(report: dict, sources: list[dict], claims: list[dict]) -> dict:
+def _outreach_plan(report: dict, sources: list[dict], claims: list[dict], qualification: dict) -> dict:
     """Structured, auditable state for the later message/critic stages."""
     evidence = [
         {"claim": item.get("claim", ""), "evidence": item.get("evidence", ""), "url": item.get("url", ""),
@@ -79,7 +80,7 @@ def _outreach_plan(report: dict, sources: list[dict], claims: list[dict]) -> dic
     signals = report.get("vacancy_signals") or []
     pains = report.get("pains") or []
     return {
-        "qualification": {"status": "needs_review", "reason": "Автоматическая квалификация требует подтверждения человеком."},
+        "qualification": qualification,
         "evidence_ledger": evidence,
         "process_map": [],
         "hypotheses": pains[:4],
@@ -112,6 +113,16 @@ def run_job(store: ResearchJobStore, job: dict) -> None:
             last_notify = time.monotonic()
 
     try:
+        progress("planning", 3, "Быстро проверяю соответствие ICP и наличие триггера.")
+        qualification = quick_qualify(str(job["request"]))
+        if str(qualification.get("decision")) == "reject":
+            plan = {"qualification": qualification, "evidence_ledger": [], "hypotheses": [], "selected_angle": {},
+                    "contact_strategy": {}, "first_message": {}, "critic": {"rewrite_required": True, "blockers": ["Лид отклонён на быстрой квалификации."]}}
+            if job.get("contact_id"):
+                store.save_outreach_plan(str(job["contact_id"]), job_id, plan)
+            store.update(job_id, status="completed", stage="Лид отклонён", progress=100, detail=str(qualification.get("reason") or "Не рекомендую писать."), report=json.dumps({"qualification": qualification}, ensure_ascii=False))
+            _telegram("sendMessage", {"chat_id": job["chat_id"], "text": f"По быстрой квалификации: <b>не рекомендую писать</b>.\n{html.escape(str(qualification.get('reason') or 'Недостаточно оснований.'))}", "parse_mode": "HTML"})
+            return
         report, sources, claims = deep_company_research(
             str(job["request"]), max_iterations=int(job["max_iterations"]), max_sources=int(job["max_sources"]),
             refinement=str(job.get("refinement") or ""), progress=progress, cancelled=lambda: store.is_cancelled(job_id),
@@ -120,8 +131,14 @@ def run_job(store: ResearchJobStore, job: dict) -> None:
         if store.is_cancelled(job_id):
             return
         store.replace_evidence(job_id, sources, claims)
+        plan = _outreach_plan(report, sources, claims, qualification)
+        try:
+            plan.update(build_outreach_plan(report, sources, claims, qualification))
+        except Exception:
+            logger.exception("Outreach strategy generation failed for research %s", job_id)
+            plan["critic"] = {"rewrite_required": True, "blockers": ["Не удалось безопасно сгенерировать стратегию."]}
         if job.get("contact_id"):
-            store.save_outreach_plan(str(job["contact_id"]), job_id, _outreach_plan(report, sources, claims))
+            store.save_outreach_plan(str(job["contact_id"]), job_id, plan)
         store.update(job_id, status="analyzing", stage="Публикация", progress=96, detail="Сохраняю доказательный отчёт в Google Docs.", source_count=len(sources), report=json.dumps(report, ensure_ascii=False))
         _notify_progress(store.get(job_id) or job)
         url = create_company_research_tab(_title(str(job["request"])), report)
@@ -130,7 +147,10 @@ def run_job(store: ResearchJobStore, job: dict) -> None:
             update_contact_research_url(str(job["contact_id"]), url)
         final = store.get(job_id) or job
         _notify_progress(final)
-        _telegram("sendMessage", {"chat_id": job["chat_id"], "text": f"Исследование <code>{job_id}</code> готово.\nОтчёт с источниками: {html.escape(url)}\n\n/research_report {job_id}", "parse_mode": "HTML"})
+        draft = str((plan.get("first_message") or {}).get("recommended") or "")
+        critic = plan.get("critic") or {}
+        verdict = "можно проверить и отправить" if draft and not critic.get("rewrite_required") else "нужна доработка — отправка не предлагается"
+        _telegram("sendMessage", {"chat_id": job["chat_id"], "text": f"Исследование <code>{job_id}</code> готово.\nОтчёт: {html.escape(url)}\n\n<b>Outreach verdict:</b> {verdict}\n{('Черновик:\n' + html.escape(draft)) if draft else ''}\n\n/research_report {job_id}", "parse_mode": "HTML"})
     except InterruptedError:
         # Cancellation was persisted by the command; only release any active lease.
         store.update(job_id, release_lease=True)
