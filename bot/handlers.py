@@ -63,6 +63,7 @@ AGENT_ACTION_PREFIX = "agent_action:"
 ARCHIVE_CALLBACK_PREFIX = "archive:"
 STATUS_SUGGESTION_PREFIX = "status_suggestion:"
 RESEARCH_PREFIX = "research:"
+RESEARCH_PROPOSAL_PREFIX = "research_proposal:"
 RESEARCH_STORE = ResearchJobStore()
 SCHEDULED_PREFIX = "scheduled:"
 SCHEDULED_TIMEZONE = os.getenv("SCHEDULED_MESSAGES_TIMEZONE", "Europe/Moscow")
@@ -509,6 +510,49 @@ async def company_research_command(update: Update, context: ContextTypes.DEFAULT
         f"Исследование <code>{job['id']}</code> поставлено в очередь.\n"
         f"Лимиты: до {job['max_minutes']} минут, {job['max_sources']} источников, {job['max_iterations']} итераций.\n\n"
         f"/research_status {job['id']} · /research_cancel {job['id']}",
+        parse_mode="HTML",
+    )
+
+
+def _research_request_for_contact(contact: dict) -> str:
+    return (
+        "Проведи глубокий evidence-based research компании для холодного outreach. "
+        f"Контакт: {contact.get('name') or 'не указан'}; контактные данные: {contact.get('contact') or contact.get('telegram') or 'не указаны'}; "
+        f"сегмент: {', '.join(contact.get('segments') or []) or 'не указан'}; источник: {contact.get('source') or 'не указан'}. "
+        "Сначала идентифицируй компанию и доступные публичные источники. Ничего не выдумывай. "
+        "Нужны: ICP-квалификация, проверяемые факты с источниками, процесс, 2–4 гипотезы, лучший angle, ЛПР, канал, "
+        "первое сообщение и стратегия follow-up."
+    )
+
+
+async def research_proposal_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+    parts = (query.data or "").split(":", 2)
+    if len(parts) != 3:
+        return
+    _, action, contact_id = parts
+    member = await get_notion_member(update.effective_user, context)
+    contacts = await asyncio.to_thread(find_contacts, member_page_id=(member or {}).get("id"), limit=1000)
+    contact = next((item for item in contacts if str(item.get("id")) == contact_id), None)
+    if not contact:
+        await query.edit_message_text("Контакт не найден или больше не принадлежит вам.")
+        return
+    if action == "skip":
+        await asyncio.to_thread(RESEARCH_STORE.resolve_suggestion, contact_id, update.effective_user.id, "skipped")
+        await query.edit_message_text("Хорошо, research для этого контакта пока не запускаем.")
+        return
+    if action != "start":
+        return
+    await asyncio.to_thread(RESEARCH_STORE.resolve_suggestion, contact_id, update.effective_user.id, "started")
+    await query.edit_message_text("Создаю задачу глубокого исследования…")
+    job = await asyncio.to_thread(
+        RESEARCH_STORE.create, telegram_user_id=update.effective_user.id, chat_id=update.effective_chat.id,
+        request=_research_request_for_contact(contact), progress_message_id=query.message.message_id, contact_id=contact_id,
+    )
+    await query.edit_message_text(
+        f"Research <code>{job['id']}</code> поставлен в очередь для «{html.escape(str(contact.get('name') or 'контакта'))}».\n"
+        f"После завершения ссылка на Google Docs автоматически появится в Contacts.\n\n/research_status {job['id']}",
         parse_mode="HTML",
     )
 

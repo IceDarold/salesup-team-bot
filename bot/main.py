@@ -1,6 +1,7 @@
 """Telegram bot entry point for interview transcription."""
 import asyncio
 import html
+import json
 import logging
 import os
 import sys
@@ -47,6 +48,7 @@ from notion_store import find_contacts, get_contacts_with_next_step_on, list_tea
 from followups import FollowupSuggestionStore, generate_followup_sequence  # noqa: E402
 from notion_store import get_contact_status_options  # noqa: E402
 from insights import analyze_contact_status  # noqa: E402
+from research_jobs import ResearchJobStore  # noqa: E402
 from bot.handlers import (  # noqa: E402
     ARTIFACT_DECISION,
     ARCHIVE_DECISION,
@@ -130,6 +132,7 @@ from bot.handlers import (  # noqa: E402
     research_cancel_command,
     research_document_handler,
     research_refine_command,
+    research_proposal_callback,
     research_report_command,
     research_status_command,
     schedule_message_command,
@@ -405,6 +408,7 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(member_required(telegram_archive_callback), pattern=r"^archive:"))
     app.add_handler(CallbackQueryHandler(member_required(contact_status_suggestion_callback), pattern=r"^status_suggestion:"))
     app.add_handler(CallbackQueryHandler(member_required(research_callback), pattern=r"^research:"))
+    app.add_handler(CallbackQueryHandler(member_required(research_proposal_callback), pattern=r"^research_proposal:"))
     app.add_handler(CallbackQueryHandler(member_required(scheduled_callback), pattern=r"^scheduled:"))
     app.add_handler(CallbackQueryHandler(member_required(followup_callback), pattern=r"^followup:"))
     app.add_handler(ChatMemberHandler(remember_bot_chat_member, ChatMemberHandler.MY_CHAT_MEMBER))
@@ -415,6 +419,7 @@ def main() -> None:
     schedule_conversation_archives(app)
     schedule_scheduled_messages(app)
     schedule_followup_suggestions(app)
+    schedule_research_suggestions(app)
 
     logger.info("Interview bot starting")
     app.run_polling()
@@ -483,6 +488,39 @@ def schedule_scheduled_messages(app: Application) -> None:
 def schedule_followup_suggestions(app: Application) -> None:
     interval = max(900, int(os.getenv("FOLLOWUP_SCAN_SECONDS", "3600")))
     app.job_queue.run_repeating(followup_suggestions_job, interval=interval, first=45, name="followup_suggestions")
+
+
+def schedule_research_suggestions(app: Application) -> None:
+    interval = max(900, int(os.getenv("OUTREACH_RESEARCH_SCAN_SECONDS", "3600")))
+    app.job_queue.run_repeating(research_suggestions_job, interval=interval, first=60, name="research_suggestions")
+
+
+async def research_suggestions_job(context) -> None:
+    """Offer company research for new, untouched Contacts without a research URL."""
+    statuses = {item.strip() for item in os.getenv("OUTREACH_RESEARCH_CONTACT_STATUSES", "Новый").split(",") if item.strip()}
+    store = ResearchJobStore()
+    for member in await asyncio.to_thread(list_team_members):
+        try:
+            user_id = int(member.get("telegram_user_id") or "")
+        except (ValueError, TypeError):
+            continue
+        try:
+            contacts = await asyncio.to_thread(find_contacts, member_page_id=member.get("id"), limit=1000)
+            for contact in contacts:
+                contact_id = str(contact.get("id") or "")
+                if not contact_id or contact.get("status") not in statuses or contact.get("research_url") or store.has_suggestion(contact_id, user_id):
+                    continue
+                if not await asyncio.to_thread(store.create_suggestion, contact_id, user_id):
+                    continue
+                text = (
+                    f"<b>Новый контакт: {html.escape(str(contact.get('name') or 'без имени'))}</b>\n\n"
+                    "Для качественного outreach сначала стоит провести research компании: проверить ICP, триггер, процесс, "
+                    "гипотезы и подходящего ЛПР. Запустить?"
+                )
+                buttons = InlineKeyboardMarkup([[InlineKeyboardButton("🔎 Провести research", callback_data=f"research_proposal:start:{contact_id}")], [InlineKeyboardButton("Пока пропустить", callback_data=f"research_proposal:skip:{contact_id}")]])
+                await context.bot.send_message(chat_id=user_id, text=text, parse_mode="HTML", reply_markup=buttons)
+        except Exception:
+            logger.exception("Unable to propose company research for member %s", member.get("id"))
 
 
 async def scheduled_messages_job(context) -> None:
@@ -562,7 +600,12 @@ async def followup_suggestions_job(context) -> None:
                     continue
                 history = service.contact_messages(user_id, contact_id, limit=60)
                 try:
-                    payload = await asyncio.to_thread(generate_followup_sequence, contact, history)
+                    research_job = await asyncio.to_thread(ResearchJobStore().latest_for_contact, contact_id)
+                    research = json.loads(str(research_job.get("report") or "{}")) if research_job else {}
+                    if not research and contact.get("research_url"):
+                        from google_docs import read_research_document
+                        research = {"external_research": await asyncio.to_thread(read_research_document, str(contact["research_url"]))}
+                    payload = await asyncio.to_thread(generate_followup_sequence, contact, history, research)
                 except Exception:
                     logger.exception("Unable to generate follow-ups for contact %s", contact_id)
                     continue

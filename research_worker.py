@@ -17,6 +17,7 @@ from datetime import datetime, timedelta, timezone
 
 from google_docs import create_company_research_tab
 from research_jobs import ResearchJobStore
+from notion_store import update_contact_research_url
 from sales_agent import deep_company_research
 
 logging.basicConfig(format="%(asctime)s [%(levelname)s] %(name)s - %(message)s", level=logging.INFO)
@@ -99,6 +100,8 @@ def run_job(store: ResearchJobStore, job: dict) -> None:
         _notify_progress(store.get(job_id) or job)
         url = create_company_research_tab(_title(str(job["request"])), report)
         store.update(job_id, status="completed", stage="Готово", progress=100, detail="Отчёт готов.", source_count=len(sources), google_url=url)
+        if job.get("contact_id"):
+            update_contact_research_url(str(job["contact_id"]), url)
         final = store.get(job_id) or job
         _notify_progress(final)
         _telegram("sendMessage", {"chat_id": job["chat_id"], "text": f"Исследование <code>{job_id}</code> готово.\nОтчёт с источниками: {html.escape(url)}\n\n/research_report {job_id}", "parse_mode": "HTML"})

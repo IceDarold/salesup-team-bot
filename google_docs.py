@@ -5,6 +5,7 @@ import logging
 import os
 import re
 import time
+from urllib.parse import parse_qs, urlparse
 from contextlib import suppress
 from datetime import datetime
 from pathlib import Path
@@ -384,6 +385,30 @@ def create_company_research_tab(title: str, report: dict | str) -> str:
         with suppress(Exception):
             _delete_tab(service, tab_id, RESEARCH_DOC_ID)
         raise
+
+
+def read_research_document(url: str, max_chars: int = 12000) -> str:
+    """Read a linked Google Doc (or a specific tab) for grounded outreach context."""
+    match = re.search(r"/document/d/([^/]+)", url)
+    if not match:
+        return ""
+    document = _get_service().documents().get(documentId=match.group(1), includeTabsContent=True).execute()
+    requested_tab = parse_qs(urlparse(url).query).get("tab", [""])[0]
+    tabs = document.get("tabs") or []
+    if requested_tab:
+        tabs = [tab for tab in tabs if str(tab.get("tabProperties", {}).get("tabId") or "") == requested_tab] or tabs
+    pieces: list[str] = []
+    for tab in tabs:
+        content = tab.get("documentTab", {}).get("body", {}).get("content", [])
+        for element in content:
+            paragraph = element.get("paragraph", {})
+            for child in paragraph.get("elements", []):
+                text = child.get("textRun", {}).get("content", "")
+                if text:
+                    pieces.append(text)
+            if len("".join(pieces)) >= max_chars:
+                return "".join(pieces)[:max_chars]
+    return "".join(pieces)[:max_chars]
 
 
 def _insert_research_report(service, tab_id: str, title: str, report: dict) -> None:

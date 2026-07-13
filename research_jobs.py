@@ -34,6 +34,7 @@ class ResearchJobStore:
                 CREATE TABLE IF NOT EXISTS research_jobs (
                     id TEXT PRIMARY KEY, telegram_user_id INTEGER NOT NULL, chat_id INTEGER NOT NULL,
                     progress_message_id INTEGER, request TEXT NOT NULL, refinement TEXT NOT NULL DEFAULT '',
+                    contact_id TEXT NOT NULL DEFAULT '',
                     status TEXT NOT NULL, stage TEXT NOT NULL DEFAULT '', progress INTEGER NOT NULL DEFAULT 0,
                     detail TEXT NOT NULL DEFAULT '', report TEXT NOT NULL DEFAULT '', google_url TEXT NOT NULL DEFAULT '',
                     error TEXT NOT NULL DEFAULT '', source_count INTEGER NOT NULL DEFAULT 0,
@@ -43,6 +44,11 @@ class ResearchJobStore:
                     started_at TEXT, completed_at TEXT
                 );
                 CREATE INDEX IF NOT EXISTS idx_research_jobs_queue ON research_jobs(status, created_at);
+                CREATE TABLE IF NOT EXISTS research_suggestions (
+                    contact_id TEXT NOT NULL, telegram_user_id INTEGER NOT NULL, status TEXT NOT NULL,
+                    created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+                    PRIMARY KEY(contact_id, telegram_user_id)
+                );
                 CREATE TABLE IF NOT EXISTS research_sources (
                     id INTEGER PRIMARY KEY AUTOINCREMENT, job_id TEXT NOT NULL, url TEXT NOT NULL,
                     title TEXT NOT NULL DEFAULT '', excerpt TEXT NOT NULL DEFAULT '', source_type TEXT NOT NULL DEFAULT '',
@@ -62,6 +68,10 @@ class ResearchJobStore:
                 CREATE INDEX IF NOT EXISTS idx_research_events_job ON research_events(job_id, id);
                 """
             )
+            columns = {row[1] for row in db.execute("PRAGMA table_info(research_jobs)").fetchall()}
+            if "contact_id" not in columns:
+                db.execute("ALTER TABLE research_jobs ADD COLUMN contact_id TEXT NOT NULL DEFAULT ''")
+            db.execute("CREATE INDEX IF NOT EXISTS idx_research_jobs_contact ON research_jobs(contact_id, created_at)")
 
     @contextmanager
     def _tx(self) -> Iterator[sqlite3.Connection]:
@@ -69,19 +79,38 @@ class ResearchJobStore:
             with self._db:
                 yield self._db
 
-    def create(self, *, telegram_user_id: int, chat_id: int, request: str, progress_message_id: int | None) -> dict:
+    def create(self, *, telegram_user_id: int, chat_id: int, request: str, progress_message_id: int | None, contact_id: str = "") -> dict:
         job_id = uuid.uuid4().hex[:10]
         now = _now()
         with self._tx() as db:
             db.execute(
-                """INSERT INTO research_jobs (id, telegram_user_id, chat_id, progress_message_id, request, status, stage,
+                """INSERT INTO research_jobs (id, telegram_user_id, chat_id, progress_message_id, request, contact_id, status, stage,
                    created_at, updated_at, max_iterations, max_sources, max_minutes)
-                   VALUES (?, ?, ?, ?, ?, 'queued', 'В очереди', ?, ?, ?, ?, ?)""",
-                (job_id, telegram_user_id, chat_id, progress_message_id, request,
+                   VALUES (?, ?, ?, ?, ?, ?, 'queued', 'В очереди', ?, ?, ?, ?, ?)""",
+                (job_id, telegram_user_id, chat_id, progress_message_id, request, contact_id,
                  now, now, int(os.getenv("DEEP_RESEARCH_MAX_ITERATIONS", "6")),
                  int(os.getenv("DEEP_RESEARCH_MAX_SOURCES", "40")), int(os.getenv("DEEP_RESEARCH_MAX_MINUTES", "20"))),
             )
         return self.get(job_id) or {}
+
+    def has_suggestion(self, contact_id: str, telegram_user_id: int) -> bool:
+        with self._lock:
+            return bool(self._db.execute("SELECT 1 FROM research_suggestions WHERE contact_id=? AND telegram_user_id=?", (contact_id, telegram_user_id)).fetchone())
+
+    def create_suggestion(self, contact_id: str, telegram_user_id: int) -> bool:
+        now = _now()
+        with self._tx() as db:
+            result = db.execute("INSERT OR IGNORE INTO research_suggestions VALUES (?, ?, 'pending', ?, ?)", (contact_id, telegram_user_id, now, now))
+        return bool(result.rowcount)
+
+    def resolve_suggestion(self, contact_id: str, telegram_user_id: int, status: str) -> None:
+        with self._tx() as db:
+            db.execute("UPDATE research_suggestions SET status=?, updated_at=? WHERE contact_id=? AND telegram_user_id=?", (status, _now(), contact_id, telegram_user_id))
+
+    def latest_for_contact(self, contact_id: str) -> dict | None:
+        with self._lock:
+            row = self._db.execute("SELECT * FROM research_jobs WHERE contact_id=? AND status='completed' AND report != '' ORDER BY completed_at DESC LIMIT 1", (contact_id,)).fetchone()
+        return dict(row) if row else None
 
     def get(self, job_id: str, telegram_user_id: int | None = None) -> dict | None:
         sql = "SELECT * FROM research_jobs WHERE id = ?"

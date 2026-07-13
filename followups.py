@@ -72,7 +72,7 @@ class FollowupSuggestionStore:
             self.db.execute("UPDATE followup_suggestions SET status=?, decided_at=? WHERE token=? AND telegram_user_id=? AND status='pending'", (status, datetime.now().isoformat(), token, telegram_user_id))
 
 
-def generate_followup_sequence(contact: dict, messages: list[dict]) -> dict:
+def generate_followup_sequence(contact: dict, messages: list[dict], research: dict | None = None) -> dict:
     from openai import OpenAI
     key = os.getenv("OPENAI_API_KEY", "")
     if not key:
@@ -81,7 +81,8 @@ def generate_followup_sequence(contact: dict, messages: list[dict]) -> dict:
     prompt = {
         "contact": {key: contact.get(key) for key in ("name", "contact", "telegram", "status", "segments", "source")},
         "conversation": transcript,
-        "task": "Сгенерируй 3 коротких персонализированных follow-up сообщения на русском. Не выдумывай факты. Каждое следующее касание должно отличаться: value reminder, конкретный вопрос/инсайт, корректный breakup. Верни только JSON {messages:[{text,reason}]}. Если исходного касания нет, первое сообщение должно быть аккуратным началом диалога.",
+        "research": research or {},
+        "task": "Сгенерируй 3 коротких персонализированных follow-up сообщения на русском. Используй только подтверждённые факты из research; гипотезы формулируй осторожно. Не выдумывай факты. Каждое следующее касание должно добавлять новый факт, вопрос или пользу: уточнение, новый angle, маленькая ценность, корректный breakup. Верни только JSON {messages:[{text,reason}]}. Если исходного касания нет, первое сообщение должно быть аккуратным началом диалога.",
     }
     response = OpenAI(api_key=key).chat.completions.create(
         model=os.getenv("FOLLOWUP_MODEL", os.getenv("OPENAI_MODEL", "gpt-5.6-terra")),

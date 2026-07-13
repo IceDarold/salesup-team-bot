@@ -17,6 +17,7 @@ NOTION_VERSION = "2022-06-28"
 SCHEDULED_STATUS = "Sheduled"
 INTERVIEWER_FEEDBACK_PROPERTY = "Interviewer feedback"
 CONTACT_CONVERSATION_PROPERTY = "Переписка"
+CONTACT_RESEARCH_PROPERTY = "Research компании"
 FOLLOW_UPS_DB_ID_ENV = "NOTION_FOLLOW_UPS_DB_ID"
 FOLLOW_UPS_ACTIVE_STATUSES = {"Черновик", "На согласовании", "Запланировано", "Ждёт подтверждения отправки", "Отправляется"}
 NOTION_MAX_RETRIES = int(os.getenv("NOTION_MAX_RETRIES", "3"))
@@ -197,6 +198,15 @@ def create_contact(*, owner_id: str, name: str, contact: str, segment: str, sour
         source=action_source,
     )
     return response.get("url") or ""
+
+
+def update_contact_research_url(contact_id: str, url: str) -> None:
+    """Store the canonical company-research document URL on a Contact."""
+    if not contact_id or not url.startswith(("https://", "http://")):
+        raise ValueError("Research URL must be an http(s) URL.")
+    client = _NotionClient()
+    _ensure_contact_research_property(client)
+    client.update_page(contact_id, {CONTACT_RESEARCH_PROPERTY: {"url": url}})
 
 
 def find_contacts(
@@ -1041,6 +1051,7 @@ def _contact_from_page(page: dict) -> dict:
         "source": _prop_select(props.get("Источник")),
         "owner_ids": _prop_relation(props.get("Owner")),
         "last_touch": _prop_date(props.get("Последнее касание")),
+        "research_url": _prop_url(props.get(CONTACT_RESEARCH_PROPERTY)),
         "created_at": page.get("created_time", ""),
     }
 
@@ -1224,6 +1235,13 @@ def _ensure_contact_conversation_property(client) -> None:
         f"/databases/{db_id}",
         {"properties": {CONTACT_CONVERSATION_PROPERTY: {"url": {}}}},
     )
+
+
+def _ensure_contact_research_property(client) -> None:
+    database = client.retrieve_database(_contacts_db_id())
+    if CONTACT_RESEARCH_PROPERTY in database.get("properties", {}):
+        return
+    client._request("PATCH", f"/databases/{_contacts_db_id()}", {"properties": {CONTACT_RESEARCH_PROPERTY: {"url": {}}}})
 
 
 def _rich_text(value) -> dict | None:
