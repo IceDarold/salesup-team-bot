@@ -76,6 +76,11 @@ sent to the contact owner as a proposal; Notion changes only after they press
 `Обновить статус`. The review uses up to `CONTACT_STATUS_MAX_MESSAGES` messages
 (default `500`) and can use a separate `CONTACT_STATUS_MODEL`.
 
+Use `/research` and then send a PDF in a private chat to research potential
+contacts. The bot extracts its text, validates candidates with public web search,
+and returns cards with personalized outreach drafts. A message is sent only after
+the owner presses `Отправить`.
+
 Set `TELEGRAM_SESSION_ENCRYPTION_KEY` to a Fernet key. `TELEGRAM_API_ID` and
 `TELEGRAM_API_HASH` are also required. For Telegram accounts protected by 2FA,
 configure `TELEGRAM_2FA_WEB_BASE_URL` as a public HTTPS URL and proxy

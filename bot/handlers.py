@@ -17,6 +17,7 @@ import tempfile
 import time
 import urllib.parse
 import urllib.request
+from contextlib import suppress
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -37,6 +38,7 @@ from notion_store import (
     list_team_members,
 )
 from transcriber import TRANSCRIBE_MODEL, transcribe
+from sales_agent import research_pdf as research_pdf_candidates
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +59,7 @@ AGENT_PREPARED_ACTION_KEY = "agent_prepared_action"
 AGENT_ACTION_PREFIX = "agent_action:"
 ARCHIVE_CALLBACK_PREFIX = "archive:"
 STATUS_SUGGESTION_PREFIX = "status_suggestion:"
+RESEARCH_PREFIX = "research:"
 
 (
     NAME,
@@ -434,6 +437,81 @@ async def contact_status_suggestion_callback(update: Update, context: ContextTyp
         return
     _telegram_user_service(context).resolve_status_suggestion(token)
     await query.edit_message_text(f"Готово — статус обновлён на «{suggestion['suggested_status']}».")
+
+
+async def research_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Turn an uploaded research PDF into reviewed, sendable outreach drafts."""
+    if update.effective_chat and update.effective_chat.type != "private":
+        await update.effective_message.reply_text("PDF-ресёрч доступен только в личном чате с ботом.")
+        return
+    document = update.effective_message.document
+    if not document or not (document.file_name or "").lower().endswith(".pdf"):
+        return
+    progress = await update.effective_message.reply_text("Изучаю PDF и ищу релевантных людей в открытых источниках…")
+    path = ""
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as temp:
+            path = temp.name
+        await (await document.get_file()).download_to_drive(path)
+        candidates = await asyncio.to_thread(research_pdf_candidates, path)
+    except Exception:
+        logger.exception("PDF research failed")
+        await progress.edit_text("Не удалось обработать PDF. Проверь, что в нём есть текст, и попробуй ещё раз.")
+        return
+    finally:
+        if path:
+            with suppress(OSError):
+                os.unlink(path)
+    if not candidates:
+        await progress.edit_text("Не нашёл подтверждённых кандидатов по этому материалу.")
+        return
+    token = secrets.token_urlsafe(8)
+    context.user_data[f"research:{token}"] = candidates
+    await progress.edit_text(f"Готово: нашёл {len(candidates)} кандидатов. Отправляю карточки для подтверждения.")
+    for index, candidate in enumerate(candidates):
+        await _send_research_candidate(update.effective_message, token, index, candidate)
+
+
+async def research_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.effective_message.reply_text("Пришли сюда PDF с ресёрчем потенциальных контактов. Я изучу его, проверю данные в открытых источниках и подготовлю карточки с персональными сообщениями.")
+
+
+async def _send_research_candidate(message, token: str, index: int, candidate: dict) -> None:
+    sources = "\n".join(f"• {item}" for item in candidate.get("sources", [])[:3]) or "—"
+    text = (
+        f"Кандидат: {candidate.get('name') or 'не указан'}\n"
+        f"Компания / роль: {candidate.get('company') or '—'} · {candidate.get('role') or '—'}\n"
+        f"Почему: {candidate.get('why') or '—'}\n\n"
+        f"Черновик:\n{candidate.get('message') or '—'}\n\nИсточники:\n{sources}"
+    )
+    buttons = [[InlineKeyboardButton("✅ Отправить", callback_data=f"{RESEARCH_PREFIX}send:{token}:{index}"), InlineKeyboardButton("Пропустить", callback_data=f"{RESEARCH_PREFIX}skip:{token}:{index}")]]
+    await message.reply_text(text[:4000], reply_markup=InlineKeyboardMarkup(buttons))
+
+
+async def research_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+    try:
+        _, decision, token, index_text = (query.data or "").split(":", 3)
+        candidate = (context.user_data.get(f"research:{token}") or [])[int(index_text)]
+    except (ValueError, IndexError, TypeError):
+        await query.edit_message_text("Карточка больше недоступна.")
+        return
+    if decision == "skip":
+        await query.edit_message_text("Пропущено.")
+        return
+    recipient = str(candidate.get("telegram") or "").strip()
+    text = str(candidate.get("message") or "").strip()
+    if not recipient or not text:
+        await query.edit_message_text("У кандидата нет подтверждённого Telegram-ника или черновика. Сообщение не отправлено.")
+        return
+    try:
+        await _telegram_user_service(context).send_message(update.effective_user.id, recipient, text)
+    except Exception:
+        logger.exception("Unable to send research outreach")
+        await query.edit_message_text("Не удалось отправить сообщение. Проверь подключение личного Telegram.")
+        return
+    await query.edit_message_text("Готово — сообщение отправлено от твоего имени.")
 
 
 async def telegram_export(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

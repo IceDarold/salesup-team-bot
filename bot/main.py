@@ -115,6 +115,9 @@ from bot.handlers import (  # noqa: E402
     remove_member_cmd,
     remember_bot_chat_member,
     remember_group,
+    research_callback,
+    research_command,
+    research_pdf,
     set_summary_chat,
     start,
     stats,
@@ -158,6 +161,7 @@ COMMANDS = [
     BotCommand("telegram_export", "Обновить архив контакта"),
     BotCommand("telegram_delete", "Удалить архив контакта"),
     BotCommand("telegram_delete_all", "Удалить все архивы"),
+    BotCommand("research", "Пришли PDF с ресёрчем"),
     BotCommand("help", "Помощь"),
     BotCommand("info", "Статус"),
     BotCommand("cancel", "Отменить интервью"),
@@ -321,6 +325,7 @@ def main() -> None:
     app.add_handler(CommandHandler("telegram_export", member_required(telegram_export)))
     app.add_handler(CommandHandler("telegram_delete", member_required(telegram_delete)))
     app.add_handler(CommandHandler("telegram_delete_all", member_required(telegram_delete_all)))
+    app.add_handler(CommandHandler("research", member_required(research_command)))
     app.add_handler(CommandHandler("add_member", admin_required(add_member_cmd)))
     app.add_handler(CommandHandler("members", admin_required(members_cmd)))
     app.add_handler(CommandHandler("remove_member", admin_required(remove_member_cmd)))
@@ -330,8 +335,10 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(member_required(agent_action_callback), pattern=r"^agent_action:"))
     app.add_handler(CallbackQueryHandler(member_required(telegram_archive_callback), pattern=r"^archive:"))
     app.add_handler(CallbackQueryHandler(member_required(contact_status_suggestion_callback), pattern=r"^status_suggestion:"))
+    app.add_handler(CallbackQueryHandler(member_required(research_callback), pattern=r"^research:"))
     app.add_handler(ChatMemberHandler(remember_bot_chat_member, ChatMemberHandler.MY_CHAT_MEMBER))
     app.add_handler(MessageHandler(filters.ChatType.GROUPS, remember_group), group=10)
+    app.add_handler(MessageHandler(filters.Document.PDF, member_required(research_pdf)), group=1)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, member_required(agent_message)))
     schedule_next_step_reminders(app)
     schedule_conversation_archives(app)
@@ -414,12 +421,17 @@ async def conversation_archives_job(context) -> None:
                 messages = service.contact_messages(user_id, contact["id"], limit=CONTACT_STATUS_MAX_MESSAGES)
                 review = await asyncio.to_thread(analyze_contact_status, contact=contact, statuses=statuses, messages=messages)
                 if not review.get("recommend_update"):
+                    if review.get("next_action") or review.get("draft_message"):
+                        await context.bot.send_message(
+                            user_id,
+                            f"Рекомендация по контакту: {contact.get('name')}\n\nСледующее действие: {review.get('next_action') or '—'}\nДата: {review.get('due_date') or '—'}\n\nЧерновик:\n{review.get('draft_message') or '—'}",
+                        )
                     continue
                 token = service.create_status_suggestion(user_id, contact["id"], contact.get("status", ""), review["suggested_status"], review.get("reason", ""), review.get("evidence", []))
                 evidence = "\n".join(f"• {item}" for item in review.get("evidence", [])) or "—"
                 await context.bot.send_message(
                     user_id,
-                    f"Возможное обновление статуса\n\nКонтакт: {contact.get('name')}\nСейчас: {contact.get('status') or '—'}\nПредлагаю: {review['suggested_status']}\n\n{review.get('reason') or ''}\n\nДоказательства:\n{evidence}",
+                    f"Возможное обновление статуса\n\nКонтакт: {contact.get('name')}\nСейчас: {contact.get('status') or '—'}\nПредлагаю: {review['suggested_status']}\n\n{review.get('reason') or ''}\n\nСледующее действие: {review.get('next_action') or '—'}\nДата: {review.get('due_date') or '—'}\n\nЧерновик:\n{review.get('draft_message') or '—'}\n\nДоказательства:\n{evidence}",
                     reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("✅ Обновить статус", callback_data=f"status_suggestion:apply:{token}"), InlineKeyboardButton("Оставить текущий", callback_data=f"status_suggestion:keep:{token}")]]),
                 )
         except Exception:

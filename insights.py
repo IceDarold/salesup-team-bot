@@ -85,7 +85,7 @@ def analyze_contact_status(*, contact: dict, statuses: list[str], messages: list
         "contact": {"name": contact.get("name"), "current_status": contact.get("status")},
         "allowed_statuses": statuses,
         "conversation": transcript,
-        "task": "Определи актуальный статус только при явных доказательствах в переписке. Если данных недостаточно или текущий статус верен, верни recommend_update=false. Не делай предположений. Верни JSON: recommend_update (bool), suggested_status (строка из allowed_statuses или пустая), reason (кратко), evidence (до 3 коротких цитат).",
+        "task": "Определи актуальный статус только при явных доказательствах в переписке. Предложи конкретное следующее действие, дату если она явно звучит, и короткий персонализированный черновик сообщения. Если данных недостаточно или текущий статус верен, верни recommend_update=false. Не делай предположений. Верни JSON: recommend_update (bool), suggested_status (строка из allowed_statuses или пустая), reason, evidence (до 3 коротких цитат), next_action, due_date, draft_message.",
     }
     completion = _client().chat.completions.create(
         model=CONTACT_STATUS_MODEL,
@@ -100,6 +100,9 @@ def analyze_contact_status(*, contact: dict, statuses: list[str], messages: list
     result["suggested_status"] = suggested
     result["reason"] = str(result.get("reason") or "")[:700]
     result["evidence"] = [str(item)[:500] for item in (result.get("evidence") or [])[:3]]
+    result["next_action"] = str(result.get("next_action") or "")[:700]
+    result["due_date"] = str(result.get("due_date") or "")[:80]
+    result["draft_message"] = str(result.get("draft_message") or "")[:1500]
     return result
 
 

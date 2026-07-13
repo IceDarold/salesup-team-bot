@@ -8,3 +8,4 @@ aiohttp>=3.10.0
 cryptography>=43.0.0
 qrcode[pil]>=8.0
 telethon>=1.38.0
+pypdf>=5.0.0
