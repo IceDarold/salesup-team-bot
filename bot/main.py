@@ -117,7 +117,7 @@ from bot.handlers import (  # noqa: E402
     remember_group,
     research_callback,
     research_command,
-    research_pdf,
+    research_document_handler,
     set_summary_chat,
     start,
     stats,
@@ -338,7 +338,7 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(member_required(research_callback), pattern=r"^research:"))
     app.add_handler(ChatMemberHandler(remember_bot_chat_member, ChatMemberHandler.MY_CHAT_MEMBER))
     app.add_handler(MessageHandler(filters.ChatType.GROUPS, remember_group), group=10)
-    app.add_handler(MessageHandler(filters.Document.PDF, member_required(research_pdf)), group=1)
+    app.add_handler(MessageHandler(filters.Document.PDF | filters.Document.FileExtension("docx"), member_required(research_document_handler)), group=1)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, member_required(agent_message)))
     schedule_next_step_reminders(app)
     schedule_conversation_archives(app)

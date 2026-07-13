@@ -76,7 +76,7 @@ sent to the contact owner as a proposal; Notion changes only after they press
 `Обновить статус`. The review uses up to `CONTACT_STATUS_MAX_MESSAGES` messages
 (default `500`) and can use a separate `CONTACT_STATUS_MODEL`.
 
-Use `/research` and then send a PDF in a private chat to research potential
+Use `/research` and then send a PDF or DOCX in a private chat to research potential
 contacts. The bot extracts its text, validates candidates with public web search,
 and returns cards with personalized outreach drafts. A message is sent only after
 the owner presses `Отправить`.

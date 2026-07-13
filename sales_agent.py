@@ -18,11 +18,15 @@ def _json(value: str) -> dict:
     return json.loads(value)
 
 
-def research_pdf(path: str) -> list[dict]:
-    from pypdf import PdfReader
-    text = "\n".join(page.extract_text() or "" for page in PdfReader(path).pages)[:120000]
+def research_document(path: str) -> list[dict]:
+    if path.lower().endswith(".docx"):
+        from docx import Document
+        text = "\n".join(paragraph.text for paragraph in Document(path).paragraphs)[:120000]
+    else:
+        from pypdf import PdfReader
+        text = "\n".join(page.extract_text() or "" for page in PdfReader(path).pages)[:120000]
     if not text.strip():
-        raise ValueError("В PDF не удалось извлечь текст; нужен текстовый PDF или OCR.")
+        raise ValueError("В документе не удалось извлечь текст; для скана нужен OCR.")
     prompt = """Изучи материал, выполни web search по потенциальным B2B-контактам и верни только JSON: {\"candidates\":[{\"name\":\"\",\"telegram\":\"\",\"company\":\"\",\"role\":\"\",\"why\":\"\",\"sources\":[\"\"],\"message\":\"\"}]}. Не выдумывай контакты, Telegram или источники. Максимум 10 кандидатов. Сообщение — персонализированный короткий первый outreach на русском."""
     response = _client().responses.create(
         model=os.getenv("SALES_RESEARCH_MODEL", "gpt-5.6-terra"),

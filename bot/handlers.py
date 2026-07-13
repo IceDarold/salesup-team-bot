@@ -38,7 +38,7 @@ from notion_store import (
     list_team_members,
 )
 from transcriber import TRANSCRIBE_MODEL, transcribe
-from sales_agent import research_pdf as research_pdf_candidates
+from sales_agent import research_document
 
 logger = logging.getLogger(__name__)
 
@@ -439,24 +439,25 @@ async def contact_status_suggestion_callback(update: Update, context: ContextTyp
     await query.edit_message_text(f"Готово — статус обновлён на «{suggestion['suggested_status']}».")
 
 
-async def research_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Turn an uploaded research PDF into reviewed, sendable outreach drafts."""
+async def research_document_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Turn an uploaded PDF or DOCX into reviewed, sendable outreach drafts."""
     if update.effective_chat and update.effective_chat.type != "private":
         await update.effective_message.reply_text("PDF-ресёрч доступен только в личном чате с ботом.")
         return
     document = update.effective_message.document
-    if not document or not (document.file_name or "").lower().endswith(".pdf"):
+    suffix = Path(document.file_name or "").suffix.lower() if document else ""
+    if suffix not in {".pdf", ".docx"}:
         return
-    progress = await update.effective_message.reply_text("Изучаю PDF и ищу релевантных людей в открытых источниках…")
+    progress = await update.effective_message.reply_text("Изучаю документ и ищу релевантных людей в открытых источниках…")
     path = ""
     try:
-        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as temp:
+        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as temp:
             path = temp.name
         await (await document.get_file()).download_to_drive(path)
-        candidates = await asyncio.to_thread(research_pdf_candidates, path)
+        candidates = await asyncio.to_thread(research_document, path)
     except Exception:
         logger.exception("PDF research failed")
-        await progress.edit_text("Не удалось обработать PDF. Проверь, что в нём есть текст, и попробуй ещё раз.")
+        await progress.edit_text("Не удалось обработать документ. Проверь, что в нём есть текст, и попробуй ещё раз.")
         return
     finally:
         if path:
@@ -473,7 +474,7 @@ async def research_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 
 async def research_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.effective_message.reply_text("Пришли сюда PDF с ресёрчем потенциальных контактов. Я изучу его, проверю данные в открытых источниках и подготовлю карточки с персональными сообщениями.")
+    await update.effective_message.reply_text("Пришли сюда PDF или DOCX с ресёрчем потенциальных контактов. Я изучу его, проверю данные в открытых источниках и подготовлю карточки с персональными сообщениями.")
 
 
 async def _send_research_candidate(message, token: str, index: int, candidate: dict) -> None:
