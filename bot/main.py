@@ -134,6 +134,7 @@ from bot.handlers import (  # noqa: E402
     research_document_handler,
     research_refine_command,
     research_proposal_callback,
+    research_contact_callback,
     research_link_entry,
     research_link_value,
     research_report_command,
@@ -422,6 +423,7 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(member_required(telegram_archive_callback), pattern=r"^archive:"))
     app.add_handler(CallbackQueryHandler(member_required(contact_status_suggestion_callback), pattern=r"^status_suggestion:"))
     app.add_handler(CallbackQueryHandler(member_required(research_callback), pattern=r"^research:"))
+    app.add_handler(CallbackQueryHandler(member_required(research_contact_callback), pattern=r"^research_contact:"))
     app.add_handler(CallbackQueryHandler(member_required(research_proposal_callback), pattern=r"^research_proposal:"))
     app.add_handler(CallbackQueryHandler(member_required(scheduled_callback), pattern=r"^scheduled:"))
     app.add_handler(CallbackQueryHandler(member_required(followup_callback), pattern=r"^followup:"))

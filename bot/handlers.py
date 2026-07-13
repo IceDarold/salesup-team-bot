@@ -65,6 +65,7 @@ ARCHIVE_CALLBACK_PREFIX = "archive:"
 STATUS_SUGGESTION_PREFIX = "status_suggestion:"
 RESEARCH_PREFIX = "research:"
 RESEARCH_PROPOSAL_PREFIX = "research_proposal:"
+RESEARCH_CONTACT_PREFIX = "research_contact:"
 RESEARCH_STORE = ResearchJobStore()
 SCHEDULED_PREFIX = "scheduled:"
 SCHEDULED_TIMEZONE = os.getenv("SCHEDULED_MESSAGES_TIMEZONE", "Europe/Moscow")
@@ -509,7 +510,50 @@ async def research_document_handler(update: Update, context: ContextTypes.DEFAUL
 
 
 async def research_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.effective_message.reply_text("Пришли сюда PDF или DOCX с ресёрчем потенциальных контактов. Я изучу его, проверю данные в открытых источниках и подготовлю карточки с персональными сообщениями.")
+    if context.args:
+        await update.effective_message.reply_text("Для глубокого исследования компании используй /company_research. Для PDF/DOCX просто прикрепи документ сюда.")
+        return
+    member = await get_notion_member(update.effective_user, context)
+    contacts = await asyncio.to_thread(find_contacts, member_page_id=(member or {}).get("id"), limit=1000)
+    store = ResearchJobStore()
+    suitable = [item for item in contacts if item.get("status") == "Новый" and not item.get("research_url") and not store.has_active_for_contact(str(item.get("id") or ""))]
+    if not suitable:
+        await update.effective_message.reply_text("Нет новых контактов без research. Для PDF/DOCX просто прикрепи документ сюда.")
+        return
+    buttons = []
+    for contact in suitable[:30]:
+        company = str(contact.get("company") or "").strip()
+        trigger = str(contact.get("trigger") or "").strip()
+        label = f"{contact.get('name') or 'Без имени'}" + (f" · {company}" if company else "") + (f" · {trigger[:25]}" if trigger else "")
+        buttons.append([InlineKeyboardButton(label[:60], callback_data=f"{RESEARCH_CONTACT_PREFIX}open:{contact['id']}")])
+    await update.effective_message.reply_text("<b>Контакты, подходящие для research</b>\nВыбери контакт — покажу карточку и предложу запуск.", parse_mode="HTML", reply_markup=InlineKeyboardMarkup(buttons))
+
+
+async def research_contact_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+    try:
+        _, action, contact_id = (query.data or "").split(":", 2)
+    except ValueError:
+        return
+    if action != "open":
+        return
+    member = await get_notion_member(update.effective_user, context)
+    contacts = await asyncio.to_thread(find_contacts, member_page_id=(member or {}).get("id"), limit=1000)
+    contact = next((item for item in contacts if str(item.get("id")) == contact_id), None)
+    if not contact or contact.get("research_url"):
+        await query.edit_message_text("Контакт недоступен: research уже добавлен или запись изменилась.")
+        return
+    details = [f"<b>{html.escape(str(contact.get('name') or 'Контакт'))}</b>"]
+    if contact.get("company"):
+        details.append(f"Компания: {html.escape(str(contact['company']))}")
+    if contact.get("company_site"):
+        details.append(f"Сайт: {html.escape(str(contact['company_site']))}")
+    if contact.get("trigger"):
+        details.append(f"Триггер: {html.escape(str(contact['trigger']))}")
+    details.append("\nЗапустить глубокий research, прикрепить готовый документ или пропустить?")
+    buttons = InlineKeyboardMarkup([[InlineKeyboardButton("🔎 Провести research", callback_data=f"{RESEARCH_PROPOSAL_PREFIX}start:{contact_id}")], [InlineKeyboardButton("📎 Прикрепить готовый research", callback_data=f"{RESEARCH_PROPOSAL_PREFIX}attach:{contact_id}")], [InlineKeyboardButton("Пока пропустить", callback_data=f"{RESEARCH_PROPOSAL_PREFIX}skip:{contact_id}")]])
+    await query.edit_message_text("\n".join(details), parse_mode="HTML", reply_markup=buttons)
 
 
 async def company_research_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

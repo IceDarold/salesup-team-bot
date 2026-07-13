@@ -122,6 +122,10 @@ class ResearchJobStore:
             row = self._db.execute("SELECT * FROM research_jobs WHERE contact_id=? AND status='completed' AND report != '' ORDER BY completed_at DESC LIMIT 1", (contact_id,)).fetchone()
         return dict(row) if row else None
 
+    def has_active_for_contact(self, contact_id: str) -> bool:
+        with self._lock:
+            return bool(self._db.execute("SELECT 1 FROM research_jobs WHERE contact_id=? AND status NOT IN ('completed','failed','cancelled')", (contact_id,)).fetchone())
+
     def save_outreach_plan(self, contact_id: str, research_job_id: str, plan: dict) -> None:
         now = _now()
         with self._tx() as db:
