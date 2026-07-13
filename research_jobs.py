@@ -38,6 +38,7 @@ class ResearchJobStore:
                     status TEXT NOT NULL, stage TEXT NOT NULL DEFAULT '', progress INTEGER NOT NULL DEFAULT 0,
                     detail TEXT NOT NULL DEFAULT '', report TEXT NOT NULL DEFAULT '', google_url TEXT NOT NULL DEFAULT '',
                     error TEXT NOT NULL DEFAULT '', source_count INTEGER NOT NULL DEFAULT 0,
+                    usage_json TEXT NOT NULL DEFAULT '{}', duration_seconds REAL NOT NULL DEFAULT 0,
                     iteration INTEGER NOT NULL DEFAULT 0, max_iterations INTEGER NOT NULL DEFAULT 6,
                     max_sources INTEGER NOT NULL DEFAULT 40, max_minutes INTEGER NOT NULL DEFAULT 20,
                     lease_until TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
@@ -81,6 +82,10 @@ class ResearchJobStore:
             columns = {row[1] for row in db.execute("PRAGMA table_info(research_jobs)").fetchall()}
             if "contact_id" not in columns:
                 db.execute("ALTER TABLE research_jobs ADD COLUMN contact_id TEXT NOT NULL DEFAULT ''")
+            if "usage_json" not in columns:
+                db.execute("ALTER TABLE research_jobs ADD COLUMN usage_json TEXT NOT NULL DEFAULT '{}'")
+            if "duration_seconds" not in columns:
+                db.execute("ALTER TABLE research_jobs ADD COLUMN duration_seconds REAL NOT NULL DEFAULT 0")
             db.execute("CREATE INDEX IF NOT EXISTS idx_research_jobs_contact ON research_jobs(contact_id, created_at)")
 
     @contextmanager
@@ -183,10 +188,11 @@ class ResearchJobStore:
     def update(self, job_id: str, *, status: str | None = None, stage: str | None = None,
                progress: int | None = None, detail: str | None = None, error: str | None = None,
                source_count: int | None = None, iteration: int | None = None, report: str | None = None,
-               google_url: str | None = None, release_lease: bool = False) -> None:
+               google_url: str | None = None, usage: dict | None = None, duration_seconds: float | None = None, release_lease: bool = False) -> None:
         values: dict[str, object] = {"updated_at": _now()}
         for key, value in {"status": status, "stage": stage, "progress": progress, "detail": detail, "error": error,
-                           "source_count": source_count, "iteration": iteration, "report": report, "google_url": google_url}.items():
+                           "source_count": source_count, "iteration": iteration, "report": report, "google_url": google_url,
+                           "usage_json": json.dumps(usage, ensure_ascii=False) if usage is not None else None, "duration_seconds": duration_seconds}.items():
             if value is not None:
                 values[key] = value
         if status in TERMINAL:

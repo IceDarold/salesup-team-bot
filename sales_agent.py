@@ -3,7 +3,33 @@ from __future__ import annotations
 
 import json
 import os
+from contextvars import ContextVar
 from typing import Callable
+
+
+_usage_tracker: ContextVar[dict | None] = ContextVar("research_usage_tracker", default=None)
+
+
+def start_usage_tracking() -> object:
+    return _usage_tracker.set({"input_tokens": 0, "output_tokens": 0, "total_tokens": 0, "calls": 0})
+
+
+def usage_snapshot() -> dict:
+    return dict(_usage_tracker.get() or {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0, "calls": 0})
+
+
+def stop_usage_tracking(token: object) -> None:
+    _usage_tracker.reset(token)
+
+
+def _record_usage(response) -> None:
+    tracker = _usage_tracker.get()
+    usage = getattr(response, "usage", None)
+    if not tracker or not usage:
+        return
+    for key in ("input_tokens", "output_tokens", "total_tokens"):
+        tracker[key] += int(getattr(usage, key, 0) or 0)
+    tracker["calls"] += 1
 
 
 def _client():
@@ -25,6 +51,7 @@ def _json_response(prompt: str, *, model: str, tools: list[dict] | None = None) 
     if tools:
         kwargs["tools"] = tools
     response = _client().responses.create(**kwargs)
+    _record_usage(response)
     try:
         return _json(str(response.output_text or ""))
     except (TypeError, ValueError, json.JSONDecodeError) as exc:

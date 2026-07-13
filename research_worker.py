@@ -19,7 +19,7 @@ from datetime import datetime, timedelta, timezone
 from google_docs import create_company_research_tab
 from research_jobs import ResearchJobStore
 from notion_store import get_contact, update_contact_research_state, update_contact_research_url
-from sales_agent import deep_company_research
+from sales_agent import deep_company_research, start_usage_tracking, stop_usage_tracking, usage_snapshot
 from outreach import ask_user_for_research_context, build_outreach_plan, quick_qualify
 
 logging.basicConfig(format="%(asctime)s [%(levelname)s] %(name)s - %(message)s", level=logging.INFO)
@@ -141,8 +141,19 @@ def _clarification_request(job: dict, report: dict) -> str:
     return f"Я уже попробовал поиск по доступным данным, включая имя контакта.{gap_text} Пришли, пожалуйста, {requested} — и я продолжу тот же research."
 
 
+def _usage_line(usage: dict, seconds: float) -> str:
+    input_tokens, output_tokens = int(usage.get("input_tokens", 0)), int(usage.get("output_tokens", 0))
+    in_rate = float(os.getenv("RESEARCH_INPUT_USD_PER_M_TOKENS", "0") or 0)
+    out_rate = float(os.getenv("RESEARCH_OUTPUT_USD_PER_M_TOKENS", "0") or 0)
+    cost = input_tokens / 1_000_000 * in_rate + output_tokens / 1_000_000 * out_rate
+    cost_text = f"${cost:.4f}" if in_rate or out_rate else "не настроена"
+    return f"Время: {seconds:.0f} сек. · токены: {input_tokens:,} input / {output_tokens:,} output · стоимость: {cost_text}"
+
+
 def run_job(store: ResearchJobStore, job: dict) -> None:
     job_id = str(job["id"])
+    started = time.monotonic()
+    usage_token = start_usage_tracking()
     deadline = datetime.now(timezone.utc) + timedelta(minutes=int(job["max_minutes"]))
     last_notify = 0.0
 
@@ -212,7 +223,9 @@ def run_job(store: ResearchJobStore, job: dict) -> None:
         store.update(job_id, status="analyzing", stage="Публикация", progress=96, detail="Сохраняю доказательный отчёт в Google Docs.", source_count=len(sources), report=json.dumps(report, ensure_ascii=False))
         _notify_progress(store.get(job_id) or job)
         url = create_company_research_tab(_title(str(job["request"])), report)
-        store.update(job_id, status="completed", stage="Готово", progress=100, detail="Отчёт готов.", source_count=len(sources), google_url=url)
+        usage = usage_snapshot()
+        elapsed = time.monotonic() - started
+        store.update(job_id, status="completed", stage="Готово", progress=100, detail="Отчёт готов.", source_count=len(sources), google_url=url, usage=usage, duration_seconds=elapsed)
         if job.get("contact_id"):
             update_contact_research_url(str(job["contact_id"]), url)
         final = store.get(job_id) or job
@@ -222,7 +235,7 @@ def run_job(store: ResearchJobStore, job: dict) -> None:
         mode = (plan.get("communication_state") or {}).get("mode", "research_only")
         verdict = "можно проверить и отправить" if mode == "first_message" and draft and not critic.get("rewrite_required") else "первое сообщение не предлагается"
         next_text = {"next_followup": "Первое касание уже есть: research будет использован для следующего follow-up.", "reply_analysis": "Контакт уже ответил: автоматические касания не предлагаются, нужен разбор ответа.", "no_cold_outreach": "Контакт уже не в стадии холодного outreach."}.get(mode, "")
-        _telegram("sendMessage", {"chat_id": job["chat_id"], "text": f"Исследование <code>{job_id}</code> готово.\nОтчёт: {html.escape(url)}\n\n<b>Outreach verdict:</b> {verdict}\n{html.escape(next_text)}\n{('Черновик:\n' + html.escape(draft)) if draft else ''}\n\n/research_report {job_id}", "parse_mode": "HTML"})
+        _telegram("sendMessage", {"chat_id": job["chat_id"], "text": f"Исследование <code>{job_id}</code> готово.\nОтчёт: {html.escape(url)}\n{_usage_line(usage, elapsed)}\n\n<b>Outreach verdict:</b> {verdict}\n{html.escape(next_text)}\n{('Черновик:\n' + html.escape(draft)) if draft else ''}\n\n/research_report {job_id}", "parse_mode": "HTML"})
     except InterruptedError:
         # Cancellation was persisted by the command; only release any active lease.
         store.update(job_id, release_lease=True)
@@ -246,6 +259,8 @@ def run_job(store: ResearchJobStore, job: dict) -> None:
         _notify_progress(store.get(job_id) or job)
         if "insufficient permissions" in str(exc).lower() or "authentication" in str(exc).lower() or "api key" in str(exc).lower():
             _telegram("sendMessage", {"chat_id": job["chat_id"], "text": "Research не запущен: у OpenAI API-ключа нет нужного доступа. Обновите OPENAI_API_KEY на сервере и повторите задачу."})
+    finally:
+        stop_usage_tracking(usage_token)
 
 
 def main() -> None:
