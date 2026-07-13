@@ -10,6 +10,7 @@ import logging
 import os
 import re
 import socket
+import sqlite3
 import time
 import urllib.parse
 import urllib.request
@@ -17,7 +18,7 @@ from datetime import datetime, timedelta, timezone
 
 from google_docs import create_company_research_tab
 from research_jobs import ResearchJobStore
-from notion_store import update_contact_research_url
+from notion_store import get_contact, update_contact_research_state, update_contact_research_url
 from sales_agent import deep_company_research
 from outreach import build_outreach_plan, quick_qualify
 
@@ -93,6 +94,28 @@ def _outreach_plan(report: dict, sources: list[dict], claims: list[dict], qualif
     }
 
 
+def _communication_mode(job: dict) -> dict:
+    """Choose outreach stage from the actual archived dialogue, never from assumption."""
+    if not job.get("contact_id"):
+        return {"mode": "research_only", "reason": "Research запущен вне Contacts."}
+    contact = get_contact(str(job["contact_id"]))
+    status = str(contact.get("status") or "")
+    if status in {"Отказ", "Интервью", "Показ", "Пилот", "Клиент"}:
+        return {"mode": "no_cold_outreach", "reason": f"Текущий статус контакта: {status}."}
+    path = os.getenv("TELEGRAM_USER_DB_PATH", "data/telegram-users.sqlite3")
+    try:
+        db = sqlite3.connect(path)
+        rows = db.execute("SELECT outgoing FROM telegram_archived_messages WHERE telegram_user_id=? AND contact_id=? ORDER BY sent_at", (int(job["telegram_user_id"]), str(job["contact_id"]))).fetchall()
+        db.close()
+    except Exception:
+        rows = []
+    if any(not bool(row[0]) for row in rows):
+        return {"mode": "reply_analysis", "reason": "В переписке уже есть входящий ответ контакта."}
+    if any(bool(row[0]) for row in rows):
+        return {"mode": "next_followup", "reason": "Первое исходящее сообщение уже отправлено."}
+    return {"mode": "first_message", "reason": "Исходящих сообщений в архиве нет."}
+
+
 def run_job(store: ResearchJobStore, job: dict) -> None:
     job_id = str(job["id"])
     deadline = datetime.now(timezone.utc) + timedelta(minutes=int(job["max_minutes"]))
@@ -120,6 +143,7 @@ def run_job(store: ResearchJobStore, job: dict) -> None:
                     "contact_strategy": {}, "first_message": {}, "critic": {"rewrite_required": True, "blockers": ["Лид отклонён на быстрой квалификации."]}}
             if job.get("contact_id"):
                 store.save_outreach_plan(str(job["contact_id"]), job_id, plan)
+                update_contact_research_state(str(job["contact_id"]), "Done")
             store.update(job_id, status="completed", stage="Лид отклонён", progress=100, detail=str(qualification.get("reason") or "Не рекомендую писать."), report=json.dumps({"qualification": qualification}, ensure_ascii=False))
             _telegram("sendMessage", {"chat_id": job["chat_id"], "text": f"По быстрой квалификации: <b>не рекомендую писать</b>.\n{html.escape(str(qualification.get('reason') or 'Недостаточно оснований.'))}", "parse_mode": "HTML"})
             return
@@ -137,6 +161,10 @@ def run_job(store: ResearchJobStore, job: dict) -> None:
         except Exception:
             logger.exception("Outreach strategy generation failed for research %s", job_id)
             plan["critic"] = {"rewrite_required": True, "blockers": ["Не удалось безопасно сгенерировать стратегию."]}
+        communication = _communication_mode(job)
+        plan["communication_state"] = communication
+        if communication["mode"] != "first_message":
+            plan["first_message"] = {}
         if job.get("contact_id"):
             store.save_outreach_plan(str(job["contact_id"]), job_id, plan)
         store.update(job_id, status="analyzing", stage="Публикация", progress=96, detail="Сохраняю доказательный отчёт в Google Docs.", source_count=len(sources), report=json.dumps(report, ensure_ascii=False))
@@ -149,18 +177,30 @@ def run_job(store: ResearchJobStore, job: dict) -> None:
         _notify_progress(final)
         draft = str((plan.get("first_message") or {}).get("recommended") or "")
         critic = plan.get("critic") or {}
-        verdict = "можно проверить и отправить" if draft and not critic.get("rewrite_required") else "нужна доработка — отправка не предлагается"
-        _telegram("sendMessage", {"chat_id": job["chat_id"], "text": f"Исследование <code>{job_id}</code> готово.\nОтчёт: {html.escape(url)}\n\n<b>Outreach verdict:</b> {verdict}\n{('Черновик:\n' + html.escape(draft)) if draft else ''}\n\n/research_report {job_id}", "parse_mode": "HTML"})
+        mode = (plan.get("communication_state") or {}).get("mode", "research_only")
+        verdict = "можно проверить и отправить" if mode == "first_message" and draft and not critic.get("rewrite_required") else "первое сообщение не предлагается"
+        next_text = {"next_followup": "Первое касание уже есть: research будет использован для следующего follow-up.", "reply_analysis": "Контакт уже ответил: автоматические касания не предлагаются, нужен разбор ответа.", "no_cold_outreach": "Контакт уже не в стадии холодного outreach."}.get(mode, "")
+        _telegram("sendMessage", {"chat_id": job["chat_id"], "text": f"Исследование <code>{job_id}</code> готово.\nОтчёт: {html.escape(url)}\n\n<b>Outreach verdict:</b> {verdict}\n{html.escape(next_text)}\n{('Черновик:\n' + html.escape(draft)) if draft else ''}\n\n/research_report {job_id}", "parse_mode": "HTML"})
     except InterruptedError:
         # Cancellation was persisted by the command; only release any active lease.
         store.update(job_id, release_lease=True)
         _notify_progress(store.get(job_id) or job)
     except TimeoutError as exc:
         store.update(job_id, status="failed", stage="Превышен лимит", progress=100, detail=str(exc), error=str(exc))
+        if job.get("contact_id"):
+            try:
+                update_contact_research_state(str(job["contact_id"]), "Failed")
+            except Exception:
+                logger.exception("Unable to mark timed out research as failed")
         _notify_progress(store.get(job_id) or job)
     except Exception as exc:
         logger.exception("Research job %s failed", job_id)
         store.update(job_id, status="failed", stage="Ошибка", progress=100, detail="Не удалось завершить исследование.", error=str(exc))
+        if job.get("contact_id"):
+            try:
+                update_contact_research_state(str(job["contact_id"]), "Failed")
+            except Exception:
+                logger.exception("Unable to mark Contact research as failed")
         _notify_progress(store.get(job_id) or job)
         if "insufficient permissions" in str(exc).lower() or "authentication" in str(exc).lower() or "api key" in str(exc).lower():
             _telegram("sendMessage", {"chat_id": job["chat_id"], "text": "Research не запущен: у OpenAI API-ключа нет нужного доступа. Обновите OPENAI_API_KEY на сервере и повторите задачу."})

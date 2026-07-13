@@ -37,6 +37,7 @@ from notion_store import (
     update_contact_status,
     update_followup,
     update_contact_research_url,
+    update_contact_research_state,
     get_scheduled_interviews_for_member,
     list_team_members,
 )
@@ -516,7 +517,7 @@ async def research_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     member = await get_notion_member(update.effective_user, context)
     contacts = await asyncio.to_thread(find_contacts, member_page_id=(member or {}).get("id"), limit=1000)
     store = ResearchJobStore()
-    suitable = [item for item in contacts if item.get("status") == "Новый" and not item.get("research_url") and not store.has_active_for_contact(str(item.get("id") or ""))]
+    suitable = [item for item in contacts if not item.get("research_url") and item.get("research_status") not in {"Declined", "In progress"} and not store.has_active_for_contact(str(item.get("id") or ""))]
     if not suitable:
         await update.effective_message.reply_text("Нет новых контактов без research. Для PDF/DOCX просто прикрепи документ сюда.")
         return
@@ -552,7 +553,7 @@ async def research_contact_callback(update: Update, context: ContextTypes.DEFAUL
     if contact.get("trigger"):
         details.append(f"Триггер: {html.escape(str(contact['trigger']))}")
     details.append("\nЗапустить глубокий research, прикрепить готовый документ или пропустить?")
-    buttons = InlineKeyboardMarkup([[InlineKeyboardButton("🔎 Провести research", callback_data=f"{RESEARCH_PROPOSAL_PREFIX}start:{contact_id}")], [InlineKeyboardButton("📎 Прикрепить готовый research", callback_data=f"{RESEARCH_PROPOSAL_PREFIX}attach:{contact_id}")], [InlineKeyboardButton("Пока пропустить", callback_data=f"{RESEARCH_PROPOSAL_PREFIX}skip:{contact_id}")]])
+    buttons = InlineKeyboardMarkup([[InlineKeyboardButton("🔎 Провести research", callback_data=f"{RESEARCH_PROPOSAL_PREFIX}start:{contact_id}")], [InlineKeyboardButton("📎 Прикрепить готовый research", callback_data=f"{RESEARCH_PROPOSAL_PREFIX}attach:{contact_id}")], [InlineKeyboardButton("Вернуться позже", callback_data=f"{RESEARCH_PROPOSAL_PREFIX}later:{contact_id}")], [InlineKeyboardButton("Не делать research", callback_data=f"{RESEARCH_PROPOSAL_PREFIX}skip:{contact_id}")]])
     await query.edit_message_text("\n".join(details), parse_mode="HTML", reply_markup=buttons)
 
 
@@ -608,7 +609,14 @@ async def research_proposal_callback(update: Update, context: ContextTypes.DEFAU
         return
     if action == "skip":
         await asyncio.to_thread(RESEARCH_STORE.resolve_suggestion, contact_id, update.effective_user.id, "skipped")
+        await asyncio.to_thread(update_contact_research_state, contact_id, "Declined")
         await query.edit_message_text("Хорошо, research для этого контакта пока не запускаем.")
+        return
+    if action == "later":
+        revisit = datetime.now(timezone.utc) + timedelta(days=int(os.getenv("RESEARCH_LATER_DAYS", "7")))
+        await asyncio.to_thread(RESEARCH_STORE.resolve_suggestion, contact_id, update.effective_user.id, "later")
+        await asyncio.to_thread(update_contact_research_state, contact_id, "Later", revisit)
+        await query.edit_message_text(f"Хорошо, вернусь с предложением research через 7 дней.")
         return
     if action == "attach":
         # This action is handled by its ConversationHandler; keep the global
@@ -617,6 +625,7 @@ async def research_proposal_callback(update: Update, context: ContextTypes.DEFAU
     if action != "start":
         return
     await asyncio.to_thread(RESEARCH_STORE.resolve_suggestion, contact_id, update.effective_user.id, "started")
+    await asyncio.to_thread(update_contact_research_state, contact_id, "In progress")
     await query.edit_message_text("Создаю задачу глубокого исследования…")
     job = await asyncio.to_thread(
         RESEARCH_STORE.create, telegram_user_id=update.effective_user.id, chat_id=update.effective_chat.id,

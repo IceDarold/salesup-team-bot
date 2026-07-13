@@ -44,7 +44,7 @@ load_dotenv()
 from bot.access import admin_required, init_access_db, member_required  # noqa: E402
 from bot.telegram_user import TelegramUserService  # noqa: E402
 from bot.telegram_web import TelegramTwoFactorServer  # noqa: E402
-from notion_store import find_contacts, get_contacts_with_next_step_on, list_team_members, list_followups_for_contacts, stop_contact_followups, update_followup  # noqa: E402
+from notion_store import find_contacts, get_contacts_with_next_step_on, list_team_members, list_followups_for_contacts, stop_contact_followups, update_contact_research_state, update_followup  # noqa: E402
 from followups import FollowupSuggestionStore, generate_adaptive_followup, generate_followup_sequence  # noqa: E402
 from notion_store import get_contact_status_options  # noqa: E402
 from insights import analyze_contact_status  # noqa: E402
@@ -524,16 +524,33 @@ async def research_suggestions_job(context) -> None:
             contacts = await asyncio.to_thread(find_contacts, member_page_id=member.get("id"), limit=1000)
             for contact in contacts:
                 contact_id = str(contact.get("id") or "")
-                if not contact_id or contact.get("status") not in statuses or contact.get("research_url") or store.has_suggestion(contact_id, user_id):
+                research_status = contact.get("research_status") or "Not started"
+                revisit_raw = str(contact.get("research_revisit_at") or "")
+                revisit_due = False
+                if research_status == "Later" and revisit_raw:
+                    try:
+                        revisit_due = datetime.fromisoformat(revisit_raw.replace("Z", "+00:00")) <= datetime.now(timezone.utc)
+                    except ValueError:
+                        revisit_due = False
+                eligible = research_status == "Not started" or revisit_due
+                if not contact_id or contact.get("research_url") or not eligible or store.has_active_for_contact(contact_id):
+                    continue
+                if research_status == "Later" and revisit_due:
+                    await asyncio.to_thread(update_contact_research_state, contact_id, "Not started")
+                if store.has_suggestion(contact_id, user_id) and research_status != "Later":
                     continue
                 if not await asyncio.to_thread(store.create_suggestion, contact_id, user_id):
-                    continue
+                    # A previous decision exists; reset only when the scheduled
+                    # "later" date has arrived.
+                    if not revisit_due:
+                        continue
                 text = (
-                    f"<b>Новый контакт: {html.escape(str(contact.get('name') or 'без имени'))}</b>\n\n"
+                    f"<b>Контакт без research: {html.escape(str(contact.get('name') or 'без имени'))}</b>\n\n"
                     "Для качественного outreach сначала стоит провести research компании: проверить ICP, триггер, процесс, "
                     "гипотезы и подходящего ЛПР. Запустить?"
                 )
-                buttons = InlineKeyboardMarkup([[InlineKeyboardButton("🔎 Провести research", callback_data=f"research_proposal:start:{contact_id}")], [InlineKeyboardButton("📎 Прикрепить готовый research", callback_data=f"research_proposal:attach:{contact_id}")], [InlineKeyboardButton("Пока пропустить", callback_data=f"research_proposal:skip:{contact_id}")]])
+                await asyncio.to_thread(update_contact_research_state, contact_id, "Proposed")
+                buttons = InlineKeyboardMarkup([[InlineKeyboardButton("🔎 Провести research", callback_data=f"research_proposal:start:{contact_id}")], [InlineKeyboardButton("📎 Прикрепить готовый research", callback_data=f"research_proposal:attach:{contact_id}")], [InlineKeyboardButton("Вернуться позже", callback_data=f"research_proposal:later:{contact_id}")], [InlineKeyboardButton("Не делать research", callback_data=f"research_proposal:skip:{contact_id}")]])
                 await context.bot.send_message(chat_id=user_id, text=text, parse_mode="HTML", reply_markup=buttons)
         except Exception:
             logger.exception("Unable to propose company research for member %s", member.get("id"))
@@ -644,6 +661,13 @@ async def followup_suggestions_job(context) -> None:
                 if not recipient or store.has_suggestion(contact_id, user_id):
                     continue
                 history = service.contact_messages(user_id, contact_id, limit=60)
+                # Do not restart an outreach sequence after a reply, and do not
+                # label a first contact as a follow-up. Research worker proposes
+                # the first message; this flow starts only after it was sent.
+                if any(not bool(item.get("outgoing")) for item in history):
+                    continue
+                if not any(bool(item.get("outgoing")) for item in history):
+                    continue
                 try:
                     research_job = await asyncio.to_thread(ResearchJobStore().latest_for_contact, contact_id)
                     research = json.loads(str(research_job.get("report") or "{}")) if research_job else {}

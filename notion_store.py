@@ -18,6 +18,8 @@ SCHEDULED_STATUS = "Sheduled"
 INTERVIEWER_FEEDBACK_PROPERTY = "Interviewer feedback"
 CONTACT_CONVERSATION_PROPERTY = "Переписка"
 CONTACT_RESEARCH_PROPERTY = "Research компании"
+CONTACT_RESEARCH_STATUS_PROPERTY = "Research status"
+CONTACT_RESEARCH_REVISIT_PROPERTY = "Research revisit at"
 FOLLOW_UPS_DB_ID_ENV = "NOTION_FOLLOW_UPS_DB_ID"
 FOLLOW_UPS_ACTIVE_STATUSES = {"Черновик", "На согласовании", "Запланировано", "Ждёт подтверждения отправки", "Отправляется"}
 NOTION_MAX_RETRIES = int(os.getenv("NOTION_MAX_RETRIES", "3"))
@@ -205,8 +207,19 @@ def update_contact_research_url(contact_id: str, url: str) -> None:
     if not contact_id or not url.startswith(("https://", "http://")):
         raise ValueError("Research URL must be an http(s) URL.")
     client = _NotionClient()
-    _ensure_contact_research_property(client)
-    client.update_page(contact_id, {CONTACT_RESEARCH_PROPERTY: {"url": url}})
+    _ensure_contact_research_properties(client)
+    client.update_page(contact_id, {CONTACT_RESEARCH_PROPERTY: {"url": url}, CONTACT_RESEARCH_STATUS_PROPERTY: {"status": {"name": "Done"}}})
+
+
+def update_contact_research_state(contact_id: str, status: str, revisit_at: datetime | None = None) -> None:
+    if status not in {"Not started", "Proposed", "In progress", "Done", "Declined", "Later", "Failed"}:
+        raise ValueError("Unknown research status.")
+    client = _NotionClient()
+    _ensure_contact_research_properties(client)
+    props = {CONTACT_RESEARCH_STATUS_PROPERTY: {"status": {"name": status}}}
+    if revisit_at is not None or status != "Later":
+        props[CONTACT_RESEARCH_REVISIT_PROPERTY] = {"date": {"start": revisit_at.isoformat()}} if revisit_at else {"date": None}
+    client.update_page(contact_id, props)
 
 
 def find_contacts(
@@ -245,6 +258,12 @@ def find_contacts(
         if len(contacts) >= max(1, min(limit, 1000)):
             break
     return contacts
+
+
+def get_contact(contact_id: str) -> dict:
+    if not contact_id:
+        raise ValueError("contact_id is required")
+    return _contact_from_page(_NotionClient().retrieve_page(contact_id))
 
 
 def list_followups_for_contacts(contact_ids: list[str]) -> dict[str, list[dict]]:
@@ -1056,6 +1075,8 @@ def _contact_from_page(page: dict) -> dict:
         "owner_ids": _prop_relation(props.get("Owner")),
         "last_touch": _prop_date(props.get("Последнее касание")),
         "research_url": _prop_url(props.get(CONTACT_RESEARCH_PROPERTY)),
+        "research_status": _prop_status(props.get(CONTACT_RESEARCH_STATUS_PROPERTY)) or "Not started",
+        "research_revisit_at": _prop_date(props.get(CONTACT_RESEARCH_REVISIT_PROPERTY)),
         "created_at": page.get("created_time", ""),
     }
 
@@ -1242,10 +1263,22 @@ def _ensure_contact_conversation_property(client) -> None:
 
 
 def _ensure_contact_research_property(client) -> None:
+    _ensure_contact_research_properties(client)
+
+
+def _ensure_contact_research_properties(client) -> None:
     database = client.retrieve_database(_contacts_db_id())
-    if CONTACT_RESEARCH_PROPERTY in database.get("properties", {}):
+    props = database.get("properties", {})
+    additions = {}
+    if CONTACT_RESEARCH_PROPERTY not in props:
+        additions[CONTACT_RESEARCH_PROPERTY] = {"url": {}}
+    if CONTACT_RESEARCH_STATUS_PROPERTY not in props:
+        additions[CONTACT_RESEARCH_STATUS_PROPERTY] = {"status": {"options": [{"name": name} for name in ("Not started", "Proposed", "In progress", "Done", "Declined", "Later", "Failed")]}}
+    if CONTACT_RESEARCH_REVISIT_PROPERTY not in props:
+        additions[CONTACT_RESEARCH_REVISIT_PROPERTY] = {"date": {}}
+    if not additions:
         return
-    client._request("PATCH", f"/databases/{_contacts_db_id()}", {"properties": {CONTACT_RESEARCH_PROPERTY: {"url": {}}}})
+    client._request("PATCH", f"/databases/{_contacts_db_id()}", {"properties": additions})
 
 
 def _rich_text(value) -> dict | None:
