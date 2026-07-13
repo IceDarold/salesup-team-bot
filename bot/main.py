@@ -9,7 +9,7 @@ from datetime import datetime, time
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from telegram import BotCommand, MenuButtonCommands
+from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, MenuButtonCommands
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -43,6 +43,8 @@ from bot.access import admin_required, init_access_db, member_required  # noqa: 
 from bot.telegram_user import TelegramUserService  # noqa: E402
 from bot.telegram_web import TelegramTwoFactorServer  # noqa: E402
 from notion_store import find_contacts, get_contacts_with_next_step_on, list_team_members  # noqa: E402
+from notion_store import get_contact_status_options  # noqa: E402
+from insights import analyze_contact_status  # noqa: E402
 from bot.handlers import (  # noqa: E402
     ARTIFACT_DECISION,
     ARCHIVE_DECISION,
@@ -78,6 +80,7 @@ from bot.handlers import (  # noqa: E402
     cancel_contact,
     contact_custom_segment,
     contact_custom_source,
+    contact_status_suggestion_callback,
     contact_name,
     contact_segment,
     contact_source,
@@ -139,6 +142,7 @@ TELEGRAM_READ_TIMEOUT = int(os.getenv("TELEGRAM_READ_TIMEOUT", "600"))
 TELEGRAM_WRITE_TIMEOUT = int(os.getenv("TELEGRAM_WRITE_TIMEOUT", "600"))
 TELEGRAM_CONNECT_TIMEOUT = int(os.getenv("TELEGRAM_CONNECT_TIMEOUT", "30"))
 TELEGRAM_POOL_TIMEOUT = int(os.getenv("TELEGRAM_POOL_TIMEOUT", "30"))
+CONTACT_STATUS_MAX_MESSAGES = int(os.getenv("CONTACT_STATUS_MAX_MESSAGES", "500"))
 NEXT_STEP_REMINDER_TIME = os.getenv("NEXT_STEP_REMINDER_TIME", "09:00")
 NEXT_STEP_REMINDER_TIMEZONE = os.getenv("NEXT_STEP_REMINDER_TIMEZONE", "Asia/Nicosia")
 PERSISTENCE_PATH = Path(os.getenv("BOT_PERSISTENCE_PATH", "data/bot-state.pickle"))
@@ -325,6 +329,7 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(admin_required(choose_summary_chat), pattern=r"^summary_chat:"))
     app.add_handler(CallbackQueryHandler(member_required(agent_action_callback), pattern=r"^agent_action:"))
     app.add_handler(CallbackQueryHandler(member_required(telegram_archive_callback), pattern=r"^archive:"))
+    app.add_handler(CallbackQueryHandler(member_required(contact_status_suggestion_callback), pattern=r"^status_suggestion:"))
     app.add_handler(ChatMemberHandler(remember_bot_chat_member, ChatMemberHandler.MY_CHAT_MEMBER))
     app.add_handler(MessageHandler(filters.ChatType.GROUPS, remember_group), group=10)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, member_required(agent_message)))
@@ -386,7 +391,7 @@ def schedule_next_step_reminders(app: Application) -> None:
 
 
 def schedule_conversation_archives(app: Application) -> None:
-    interval = max(60, int(os.getenv("TELEGRAM_ARCHIVE_SYNC_SECONDS", "300")))
+    interval = max(60, int(os.getenv("TELEGRAM_ARCHIVE_SYNC_SECONDS", "60")))
     app.job_queue.run_repeating(conversation_archives_job, interval=interval, first=15, name="conversation_archives")
 
 
@@ -403,7 +408,20 @@ async def conversation_archives_job(context) -> None:
             continue
         try:
             contacts = await asyncio.to_thread(find_contacts, member_page_id=member.get("id"), limit=1000)
-            await service.sync_archive(user_id, contacts, member.get("name", ""))
+            sync_result = await service.sync_archive(user_id, contacts, member.get("name", ""))
+            statuses = await asyncio.to_thread(get_contact_status_options)
+            for contact in sync_result.get("changed_contacts", []):
+                messages = service.contact_messages(user_id, contact["id"], limit=CONTACT_STATUS_MAX_MESSAGES)
+                review = await asyncio.to_thread(analyze_contact_status, contact=contact, statuses=statuses, messages=messages)
+                if not review.get("recommend_update"):
+                    continue
+                token = service.create_status_suggestion(user_id, contact["id"], contact.get("status", ""), review["suggested_status"], review.get("reason", ""), review.get("evidence", []))
+                evidence = "\n".join(f"• {item}" for item in review.get("evidence", [])) or "—"
+                await context.bot.send_message(
+                    user_id,
+                    f"Возможное обновление статуса\n\nКонтакт: {contact.get('name')}\nСейчас: {contact.get('status') or '—'}\nПредлагаю: {review['suggested_status']}\n\n{review.get('reason') or ''}\n\nДоказательства:\n{evidence}",
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("✅ Обновить статус", callback_data=f"status_suggestion:apply:{token}"), InlineKeyboardButton("Оставить текущий", callback_data=f"status_suggestion:keep:{token}")]]),
+                )
         except Exception:
             logger.exception("Unable to synchronize Telegram archive for user %s", user_id)
 

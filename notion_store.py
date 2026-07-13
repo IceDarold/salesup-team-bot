@@ -965,6 +965,7 @@ def _contact_from_page(page: dict) -> dict:
         "url": page.get("url", ""),
         "name": _prop_title(props.get("Name")),
         "contact": _prop_text(props.get("Контакт")),
+        "telegram": _prop_text(props.get("Telegram")),
         "status": _prop_status(props.get("Status")),
         "segments": _prop_multi_select(props.get("Segment")),
         "source": _prop_select(props.get("Источник")),

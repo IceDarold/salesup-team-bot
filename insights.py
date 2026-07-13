@@ -21,6 +21,8 @@ REPORT_MAX_TOKENS = int(os.getenv("REPORT_MAX_TOKENS", "4500"))
 DEDUPE_MODEL = os.getenv("DEDUPE_MODEL", REPORT_MODEL)
 DEDUPE_MAX_TOKENS = int(os.getenv("DEDUPE_MAX_TOKENS", "3500"))
 DEDUPE_AUTO_MERGE_THRESHOLD = float(os.getenv("DEDUPE_AUTO_MERGE_THRESHOLD", "0.92"))
+CONTACT_STATUS_MODEL = os.getenv("CONTACT_STATUS_MODEL", INSIGHTS_MODEL)
+CONTACT_STATUS_MAX_TOKENS = int(os.getenv("CONTACT_STATUS_MAX_TOKENS", "700"))
 
 REQUIRED_TOP_LEVEL_KEYS = {
     "interview",
@@ -69,6 +71,36 @@ def analyze_interview(answers: dict, transcript: str) -> dict:
         len(payload.get("product_opportunities", [])),
     )
     return payload
+
+
+def analyze_contact_status(*, contact: dict, statuses: list[str], messages: list[dict]) -> dict:
+    """Return a conservative, evidence-backed status recommendation for one conversation."""
+    if not INSIGHTS_API_KEY:
+        raise RuntimeError("INSIGHTS_API_KEY is not set.")
+    transcript = "\n".join(
+        f"[{item.get('sent_at', '')}] {'Менеджер' if item.get('outgoing') else 'Контакт'}: {item.get('text') or item.get('media') or '[без текста]'}"
+        for item in messages
+    )
+    prompt = {
+        "contact": {"name": contact.get("name"), "current_status": contact.get("status")},
+        "allowed_statuses": statuses,
+        "conversation": transcript,
+        "task": "Определи актуальный статус только при явных доказательствах в переписке. Если данных недостаточно или текущий статус верен, верни recommend_update=false. Не делай предположений. Верни JSON: recommend_update (bool), suggested_status (строка из allowed_statuses или пустая), reason (кратко), evidence (до 3 коротких цитат).",
+    }
+    completion = _client().chat.completions.create(
+        model=CONTACT_STATUS_MODEL,
+        messages=[{"role": "system", "content": "Ты аккуратный CRM-аналитик. Отвечай только валидным JSON."}, {"role": "user", "content": json.dumps(prompt, ensure_ascii=False)}],
+        temperature=0,
+        max_tokens=CONTACT_STATUS_MAX_TOKENS,
+    )
+    result = _parse_json_response(completion.choices[0].message.content)
+    suggested = str(result.get("suggested_status") or "")
+    if suggested not in statuses or suggested == contact.get("status"):
+        result["recommend_update"] = False
+    result["suggested_status"] = suggested
+    result["reason"] = str(result.get("reason") or "")[:700]
+    result["evidence"] = [str(item)[:500] for item in (result.get("evidence") or [])[:3]]
+    return result
 
 
 def generate_report(analysis: dict) -> str:

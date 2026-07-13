@@ -32,6 +32,7 @@ from notion_store import (
     find_contacts,
     get_contact_form_options,
     get_contact_stats,
+    update_contact_status,
     get_scheduled_interviews_for_member,
     list_team_members,
 )
@@ -55,6 +56,7 @@ SETTINGS_PATH = Path(os.getenv("BOT_SETTINGS_PATH", "data/settings.json"))
 AGENT_PREPARED_ACTION_KEY = "agent_prepared_action"
 AGENT_ACTION_PREFIX = "agent_action:"
 ARCHIVE_CALLBACK_PREFIX = "archive:"
+STATUS_SUGGESTION_PREFIX = "status_suggestion:"
 
 (
     NAME,
@@ -397,6 +399,41 @@ async def telegram_archive_callback(update: Update, context: ContextTypes.DEFAUL
         await query.edit_message_text(f"Удалены архивы: {count}. Автосинхронизация отключена.")
         return
     await query.edit_message_text("Действие отменено.")
+
+
+async def contact_status_suggestion_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+    try:
+        _, decision, token = (query.data or "").split(":", 2)
+    except ValueError:
+        await query.edit_message_text("Не удалось распознать предложение.")
+        return
+    suggestion = _telegram_user_service(context).take_status_suggestion(token, update.effective_user.id)
+    if not suggestion:
+        await query.edit_message_text("Предложение уже обработано или истекло.")
+        return
+    if decision == "keep":
+        _telegram_user_service(context).resolve_status_suggestion(token)
+        await query.edit_message_text("Оставил текущий статус без изменений.")
+        return
+    if decision != "apply":
+        await query.edit_message_text("Действие отменено.")
+        return
+    member = await get_notion_member(update.effective_user, context)
+    try:
+        current = next((item for item in await asyncio.to_thread(find_contacts, member_page_id=(member or {}).get("id"), limit=1000) if item.get("id") == suggestion["contact_id"]), None)
+        if not current or current.get("status") != suggestion["expected_status"]:
+            await query.edit_message_text("Статус уже изменился после предложения; ничего не менял.")
+            _telegram_user_service(context).resolve_status_suggestion(token)
+            return
+        await asyncio.to_thread(update_contact_status, contact_id=suggestion["contact_id"], owner_id=(member or {})["id"], status=suggestion["suggested_status"], action_source="Анализ переписки")
+    except Exception:
+        logger.exception("Unable to apply conversation status suggestion")
+        await query.edit_message_text("Не удалось обновить статус в Notion.")
+        return
+    _telegram_user_service(context).resolve_status_suggestion(token)
+    await query.edit_message_text(f"Готово — статус обновлён на «{suggestion['suggested_status']}».")
 
 
 async def telegram_export(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

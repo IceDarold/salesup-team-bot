@@ -76,6 +76,12 @@ class TelegramUserService:
                 telegram_user_id INTEGER NOT NULL, contact_id TEXT NOT NULL, excluded_at TEXT NOT NULL,
                 PRIMARY KEY (telegram_user_id, contact_id))"""
             )
+            self._db.execute(
+                """CREATE TABLE IF NOT EXISTS telegram_status_suggestions (
+                token TEXT PRIMARY KEY, telegram_user_id INTEGER NOT NULL, contact_id TEXT NOT NULL,
+                expected_status TEXT NOT NULL, suggested_status TEXT NOT NULL, reason TEXT NOT NULL,
+                evidence TEXT NOT NULL, created_at TEXT NOT NULL, decided_at TEXT)"""
+            )
 
     @property
     def configured(self) -> bool:
@@ -129,6 +135,7 @@ class TelegramUserService:
             return {"contacts": 0, "messages": 0}
         matches = 0
         saved = 0
+        changed: dict[str, dict] = {}
         async with self._client(telegram_user_id) as client:
             async for dialog in client.iter_dialogs():
                 if not dialog.is_user or getattr(dialog.entity, "bot", False):
@@ -143,10 +150,36 @@ class TelegramUserService:
                 async for message in client.iter_messages(dialog.entity, min_id=last_id, reverse=True):
                     if message.action:
                         continue
-                    self._save_message(telegram_user_id, chat_id, contact["id"], message)
-                    saved += 1
+                    if self._save_message(telegram_user_id, chat_id, contact["id"], message):
+                        saved += 1
+                        changed[str(contact["id"])] = contact
         exported = await self._export_pending(telegram_user_id, owner_name)
-        return {"contacts": matches, "messages": saved, "exported": exported}
+        return {"contacts": matches, "messages": saved, "exported": exported, "changed_contacts": list(changed.values())}
+
+    def contact_messages(self, telegram_user_id: int, contact_id: str, limit: int = 500) -> list[dict]:
+        with self._lock:
+            return [dict(row) for row in self._db.execute(
+                "SELECT sent_at, outgoing, text, media FROM telegram_archived_messages WHERE telegram_user_id = ? AND contact_id = ? ORDER BY sent_at DESC, message_id DESC LIMIT ?",
+                (telegram_user_id, contact_id, max(1, min(limit, 2000))),
+            ).fetchall()][::-1]
+
+    def create_status_suggestion(self, telegram_user_id: int, contact_id: str, expected: str, suggested: str, reason: str, evidence: list[str]) -> str:
+        token = secrets.token_urlsafe(8)
+        with self._lock, self._db:
+            self._db.execute(
+                "INSERT INTO telegram_status_suggestions VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)",
+                (token, telegram_user_id, contact_id, expected, suggested, reason, json.dumps(evidence, ensure_ascii=False), datetime.now(timezone.utc).isoformat()),
+            )
+        return token
+
+    def take_status_suggestion(self, token: str, telegram_user_id: int) -> dict | None:
+        with self._lock:
+            row = self._db.execute("SELECT * FROM telegram_status_suggestions WHERE token = ? AND telegram_user_id = ? AND decided_at IS NULL", (token, telegram_user_id)).fetchone()
+        return dict(row) if row else None
+
+    def resolve_status_suggestion(self, token: str) -> None:
+        with self._lock, self._db:
+            self._db.execute("UPDATE telegram_status_suggestions SET decided_at = ? WHERE token = ?", (datetime.now(timezone.utc).isoformat(), token))
 
     async def export_contact(self, telegram_user_id: int, contact_id: str, owner_name: str = "") -> str:
         await self._export_pending(telegram_user_id, owner_name, contact_id=contact_id)
@@ -282,17 +315,18 @@ class TelegramUserService:
             ).fetchone()
         return int(row["message_id"] or 0)
 
-    def _save_message(self, telegram_user_id: int, chat_id: int, contact_id: str, message) -> None:
+    def _save_message(self, telegram_user_id: int, chat_id: int, contact_id: str, message) -> bool:
         media = _media_label(message)
         sent_at = getattr(message, "date", datetime.now(timezone.utc)).astimezone(timezone.utc).isoformat()
         with self._lock, self._db:
-            self._db.execute(
+            cursor = self._db.execute(
                 """INSERT OR IGNORE INTO telegram_archived_messages
                 (telegram_user_id, chat_id, message_id, contact_id, sent_at, outgoing, sender_id, text, media)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (telegram_user_id, chat_id, int(message.id), contact_id, sent_at, int(bool(message.out)),
                  int(message.sender_id) if message.sender_id else None, str(message.raw_text or ""), media),
             )
+        return bool(cursor.rowcount)
 
     async def _export_pending(self, telegram_user_id: int, owner_name: str, contact_id: str | None = None) -> int:
         from google_docs import append_conversation_messages, create_conversation_tab
@@ -416,7 +450,7 @@ def _match_contact(contacts: list[dict], entity) -> dict | None:
     peer_id = str(getattr(entity, "id", "") or "")
     matched = []
     for contact in contacts:
-        value = str(contact.get("contact") or "").casefold().strip()
+        value = str(contact.get("telegram") or "").casefold().strip()
         contact_username = value.rsplit("t.me/", 1)[-1].strip("/@ ") if "t.me/" in value else value.lstrip("@")
         contact_phone = _digits(value)
         if username and contact_username == username:

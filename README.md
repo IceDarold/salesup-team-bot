@@ -51,7 +51,8 @@ the confirmation button.
 
 After connecting, the bot asks for explicit consent to archive the complete
 history of personal chats that can be matched unambiguously to that member's
-Contacts records (by `@username`, `t.me` link, phone, or Telegram ID). Both
+Contacts records using the dedicated `Telegram` property (by `@username`, `t.me`
+link, phone, or Telegram ID). Both
 incoming and outgoing messages are stored in the runtime SQLite database and
 appended to a dedicated tab per contact in `GOOGLE_CONVERSATION_DOC_ID`. The tab URL is stored
 in the Contacts property `Переписка`, which the bot creates automatically when
@@ -62,8 +63,14 @@ Use `/telegram_privacy` to view or grant consent, `/telegram_export <contact>`
 to force a sync and get its Google Docs URL, `/telegram_delete <contact>` to
 delete one archive, and `/telegram_delete_all` to delete all archives and disable
 further synchronization. The periodic sync is configured by
-`TELEGRAM_ARCHIVE_SYNC_SECONDS` (default `300`). A deleted contact stays excluded
+`TELEGRAM_ARCHIVE_SYNC_SECONDS` (default `60`). A deleted contact stays excluded
 from automatic re-import; `/telegram_export <contact>` explicitly enables it again.
+
+When a synchronized chat contains new messages, the LLM compares the conversation
+with the contact's current Notion status. A differing, evidence-backed status is
+sent to the contact owner as a proposal; Notion changes only after they press
+`Обновить статус`. The review uses up to `CONTACT_STATUS_MAX_MESSAGES` messages
+(default `500`) and can use a separate `CONTACT_STATUS_MODEL`.
 
 Set `TELEGRAM_SESSION_ENCRYPTION_KEY` to a Fernet key. `TELEGRAM_API_ID` and
 `TELEGRAM_API_HASH` are also required. For Telegram accounts protected by 2FA,
