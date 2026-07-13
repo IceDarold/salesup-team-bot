@@ -561,7 +561,11 @@ async def followup_suggestions_job(context) -> None:
                 if not recipient or store.has_suggestion(contact_id, user_id):
                     continue
                 history = service.contact_messages(user_id, contact_id, limit=60)
-                payload = await asyncio.to_thread(generate_followup_sequence, contact, history)
+                try:
+                    payload = await asyncio.to_thread(generate_followup_sequence, contact, history)
+                except Exception:
+                    logger.exception("Unable to generate follow-ups for contact %s", contact_id)
+                    continue
                 payload.update({"recipient": recipient, "contact_name": contact.get("name") or ""})
                 suggestion = store.create(contact_id, str(member["id"]), user_id, payload)
                 if not suggestion:
