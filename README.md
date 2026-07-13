@@ -59,6 +59,10 @@ in the Contacts property `Переписка`, which the bot creates automatical
 needed. Groups, channels, bots, unmatched chats, and ambiguous matches are never
 archived.
 
+Telegram voice messages are downloaded during synchronization and transcribed with
+OpenAI before being appended to the conversation tab. Set `OPENAI_API_KEY` and,
+optionally, `OPENAI_TRANSCRIBE_MODEL` (default `gpt-4o-mini-transcribe`).
+
 Use `/telegram_privacy` to view or grant consent, `/telegram_export <contact>`
 to force a sync and get its Google Docs URL, `/telegram_delete <contact>` to
 delete one archive, and `/telegram_delete_all` to delete all archives and disable

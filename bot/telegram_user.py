@@ -7,6 +7,8 @@ import os
 import secrets
 import sqlite3
 import threading
+import tempfile
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from html import escape
@@ -39,6 +41,7 @@ class TelegramUserService:
         self.api_hash = os.getenv("TELEGRAM_API_HASH", "").strip()
         self._fernet = _fernet(os.getenv("TELEGRAM_SESSION_ENCRYPTION_KEY", ""))
         self.two_factor_url = os.getenv("TELEGRAM_2FA_WEB_BASE_URL", "").rstrip("/")
+        self.voice_transcription_max_bytes = int(os.getenv("TELEGRAM_VOICE_TRANSCRIPTION_MAX_MB", "25")) * 1024 * 1024
         path = Path(os.getenv("TELEGRAM_USER_DB_PATH", "data/telegram-users.sqlite3"))
         path.parent.mkdir(parents=True, exist_ok=True)
         self._db = sqlite3.connect(path, check_same_thread=False)
@@ -150,9 +153,12 @@ class TelegramUserService:
                 async for message in client.iter_messages(dialog.entity, min_id=last_id, reverse=True):
                     if message.action:
                         continue
-                    if self._save_message(telegram_user_id, chat_id, contact["id"], message):
+                    text = await self._message_text(client, message)
+                    if self._save_message(telegram_user_id, chat_id, contact["id"], message, text=text):
                         saved += 1
                         changed[str(contact["id"])] = contact
+                if await self._backfill_voice_messages(client, telegram_user_id, chat_id, str(contact["id"]), dialog.entity):
+                    changed[str(contact["id"])] = contact
         exported = await self._export_pending(telegram_user_id, owner_name)
         return {"contacts": matches, "messages": saved, "exported": exported, "changed_contacts": list(changed.values())}
 
@@ -315,7 +321,52 @@ class TelegramUserService:
             ).fetchone()
         return int(row["message_id"] or 0)
 
-    def _save_message(self, telegram_user_id: int, chat_id: int, contact_id: str, message) -> bool:
+    async def _message_text(self, client, message) -> str:
+        text = str(message.raw_text or "").strip()
+        if not getattr(message, "voice", None):
+            return text
+        size = int(getattr(getattr(message, "file", None), "size", 0) or 0)
+        if size > self.voice_transcription_max_bytes:
+            return text
+        path = ""
+        try:
+            with tempfile.NamedTemporaryFile(suffix=".ogg", delete=False) as temp:
+                path = temp.name
+            await client.download_media(message, file=path)
+            from voice_transcription import transcribe_telegram_voice
+            transcript = await asyncio.to_thread(transcribe_telegram_voice, path)
+            return f"Транскрипция голосового:\n{transcript}" if transcript else text
+        except Exception:
+            logger.exception("Unable to transcribe Telegram voice message %s", getattr(message, "id", ""))
+            return text
+        finally:
+            if path:
+                with suppress(OSError):
+                    os.unlink(path)
+
+    async def _backfill_voice_messages(self, client, telegram_user_id: int, chat_id: int, contact_id: str, entity) -> bool:
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT message_id FROM telegram_archived_messages WHERE telegram_user_id = ? AND chat_id = ? AND contact_id = ? AND media = '[Голосовое сообщение]' AND text = ''",
+                (telegram_user_id, chat_id, contact_id),
+            ).fetchall()
+        updated = False
+        for row in rows:
+            message = await client.get_messages(entity, ids=int(row["message_id"]))
+            if not message:
+                continue
+            text = await self._message_text(client, message)
+            if not text:
+                continue
+            with self._lock, self._db:
+                self._db.execute(
+                    "UPDATE telegram_archived_messages SET text = ?, exported_at = NULL WHERE telegram_user_id = ? AND chat_id = ? AND message_id = ?",
+                    (text, telegram_user_id, chat_id, int(row["message_id"])),
+                )
+            updated = True
+        return updated
+
+    def _save_message(self, telegram_user_id: int, chat_id: int, contact_id: str, message, *, text: str = "") -> bool:
         media = _media_label(message)
         sent_at = getattr(message, "date", datetime.now(timezone.utc)).astimezone(timezone.utc).isoformat()
         with self._lock, self._db:
@@ -324,7 +375,7 @@ class TelegramUserService:
                 (telegram_user_id, chat_id, message_id, contact_id, sent_at, outgoing, sender_id, text, media)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (telegram_user_id, chat_id, int(message.id), contact_id, sent_at, int(bool(message.out)),
-                 int(message.sender_id) if message.sender_id else None, str(message.raw_text or ""), media),
+                 int(message.sender_id) if message.sender_id else None, text, media),
             )
         return bool(cursor.rowcount)
 
