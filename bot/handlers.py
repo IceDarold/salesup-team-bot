@@ -539,9 +539,11 @@ async def company_research_command(update: Update, context: ContextTypes.DEFAULT
 def _research_request_for_contact(contact: dict) -> str:
     return (
         "Проведи глубокий evidence-based research компании для холодного outreach. "
+        f"Компания: {contact.get('company') or 'не указана'}; сайт компании: {contact.get('company_site') or 'не указан'}; "
+        f"вакансия/триггер: {contact.get('trigger') or 'не указан'}; дополнительный контекст: {contact.get('additional_context') or 'нет'}; "
         f"Контакт: {contact.get('name') or 'не указан'}; контактные данные: {contact.get('contact') or contact.get('telegram') or 'не указаны'}; "
         f"сегмент: {', '.join(contact.get('segments') or []) or 'не указан'}; источник: {contact.get('source') or 'не указан'}. "
-        "Сначала идентифицируй компанию и доступные публичные источники. Ничего не выдумывай. "
+        "Сайт и вакансия/триггер — первичные вводные: сначала изучи их. Если компания не указана или данных недостаточно, так и напиши; ничего не выдумывай. "
         "Нужны: ICP-квалификация, проверяемые факты с источниками, процесс, 2–4 гипотезы, лучший angle, ЛПР, канал, "
         "первое сообщение и стратегия follow-up."
     )

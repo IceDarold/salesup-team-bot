@@ -79,7 +79,7 @@ def generate_followup_sequence(contact: dict, messages: list[dict], research: di
         raise RuntimeError("OPENAI_API_KEY is not set.")
     transcript = "\n".join(f"{'Менеджер' if item.get('outgoing') else 'Контакт'}: {item.get('text') or item.get('media') or ''}" for item in messages[-60:])
     prompt = {
-        "contact": {key: contact.get(key) for key in ("name", "contact", "telegram", "status", "segments", "source")},
+        "contact": {key: contact.get(key) for key in ("name", "company", "company_site", "trigger", "additional_context", "contact", "telegram", "status", "segments", "source")},
         "conversation": transcript,
         "research": research or {},
         "task": "Сгенерируй 3 коротких персонализированных follow-up сообщения на русском. Используй только подтверждённые факты из research; гипотезы формулируй осторожно. Не выдумывай факты. Каждое следующее касание должно добавлять новый факт, вопрос или пользу: уточнение, новый angle, маленькая ценность, корректный breakup. Верни только JSON {messages:[{text,reason}]}. Если исходного касания нет, первое сообщение должно быть аккуратным началом диалога.",
