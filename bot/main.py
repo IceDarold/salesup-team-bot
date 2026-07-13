@@ -78,6 +78,7 @@ from bot.handlers import (  # noqa: E402
     SCHEDULE_TEXT,
     FOLLOWUP_EDIT_TEXT,
     RESEARCH_LINK_VALUE,
+    RESEARCH_INPUT_VALUE,
     SEGMENT,
     SUBJECT,
     add_member_cmd,
@@ -137,6 +138,8 @@ from bot.handlers import (  # noqa: E402
     research_contact_callback,
     research_link_entry,
     research_link_value,
+    research_input_entry,
+    research_input_value,
     research_report_command,
     research_status_command,
     outreach_stats_command,
@@ -337,6 +340,14 @@ def main() -> None:
             ],
             name="interview_flow",
             persistent=True,
+        )
+    )
+    app.add_handler(
+        ConversationHandler(
+            entry_points=[CallbackQueryHandler(member_required(research_input_entry), pattern=r"^research_input:provide:")],
+            states={RESEARCH_INPUT_VALUE: [MessageHandler(filters.TEXT & ~filters.COMMAND, member_required(research_input_value))]},
+            fallbacks=[CommandHandler("cancel", member_required(scheduled_cancel_flow))],
+            name="research_input_flow", persistent=True,
         )
     )
     app.add_handler(

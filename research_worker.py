@@ -116,6 +116,15 @@ def _communication_mode(job: dict) -> dict:
     return {"mode": "first_message", "reason": "Исходящих сообщений в архиве нет."}
 
 
+def _needs_more_context(report: dict, sources: list[dict]) -> bool:
+    """Ask only after a genuine search failed to establish a usable lead."""
+    if not sources:
+        return True
+    facts = report.get("company_facts") or []
+    signals = report.get("vacancy_signals") or []
+    return not facts and not signals
+
+
 def run_job(store: ResearchJobStore, job: dict) -> None:
     job_id = str(job["id"])
     deadline = datetime.now(timezone.utc) + timedelta(minutes=int(job["max_minutes"]))
@@ -153,6 +162,14 @@ def run_job(store: ResearchJobStore, job: dict) -> None:
             trace=lambda kind, title, body: _trace(store, job, kind, title, body),
         )
         if store.is_cancelled(job_id):
+            return
+        if _needs_more_context(report, sources):
+            store.replace_evidence(job_id, sources, claims)
+            store.update(job_id, status="waiting_input", stage="Нужны уточнения", progress=100,
+                         detail="Поиск выполнен, но недостаточно данных, чтобы надёжно продолжить.",
+                         report=json.dumps(report, ensure_ascii=False), source_count=len(sources), release_lease=True)
+            buttons = json.dumps({"inline_keyboard": [[{"text": "➕ Добавить данные", "callback_data": f"research_input:provide:{job_id}"}]]})
+            _telegram("sendMessage", {"chat_id": job["chat_id"], "text": "Я уже попробовал найти компанию по всем доступным данным, включая имя контакта, но не смог надёжно установить контекст. Пришли сайт, вакансию, ссылку на компанию или пару слов о ней — продолжу research.", "reply_markup": buttons})
             return
         store.replace_evidence(job_id, sources, claims)
         plan = _outreach_plan(report, sources, claims, qualification)

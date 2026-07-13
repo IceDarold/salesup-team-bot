@@ -206,7 +206,7 @@ class ResearchJobStore:
 
     def refine(self, job_id: str, telegram_user_id: int, refinement: str) -> bool:
         with self._tx() as db:
-            result = db.execute("UPDATE research_jobs SET refinement=?, status='queued', stage='Уточнение поставлено в очередь', progress=0, detail='', error='', report='', google_url='', iteration=0, lease_until=NULL, updated_at=?, completed_at=NULL WHERE id=? AND telegram_user_id=? AND status IN ('completed','failed','cancelled')",
+            result = db.execute("UPDATE research_jobs SET refinement=?, status='queued', stage='Уточнение поставлено в очередь', progress=0, detail='', error='', report='', google_url='', iteration=0, lease_until=NULL, updated_at=?, completed_at=NULL WHERE id=? AND telegram_user_id=? AND status IN ('completed','failed','cancelled','waiting_input')",
                                 (refinement, _now(), job_id, telegram_user_id))
         return bool(result.rowcount)
 

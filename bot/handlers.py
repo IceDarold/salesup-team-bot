@@ -103,6 +103,7 @@ FOLLOWUP_EDIT_TEXT = 330
 
 SCHEDULE_RECIPIENT, SCHEDULE_TEXT, SCHEDULE_DATE, SCHEDULE_HOUR, SCHEDULE_MINUTE, SCHEDULE_EDIT_VALUE = range(300, 306)
 RESEARCH_LINK_VALUE = 340
+RESEARCH_INPUT_VALUE = 341
 
 SEGMENT_KB = InlineKeyboardMarkup(
     [
@@ -588,7 +589,7 @@ def _research_request_for_contact(contact: dict) -> str:
         f"вакансия/триггер: {contact.get('trigger') or 'не указан'}; дополнительный контекст: {contact.get('additional_context') or 'нет'}; "
         f"Контакт: {contact.get('name') or 'не указан'}; контактные данные: {contact.get('contact') or contact.get('telegram') or 'не указаны'}; "
         f"сегмент: {', '.join(contact.get('segments') or []) or 'не указан'}; источник: {contact.get('source') or 'не указан'}. "
-        "Сайт и вакансия/триггер — первичные вводные: сначала изучи их. Если компания не указана или данных недостаточно, так и напиши; ничего не выдумывай. "
+        "Сайт и вакансия/триггер — первичные вводные: сначала изучи их. Если их нет, всё равно сначала попробуй найти компанию по названию, имени контакта и доступным публичным данным. Только после попытки поиска проси уточнения; ничего не выдумывай. "
         "Нужны: ICP-квалификация, проверяемые факты с источниками, процесс, 2–4 гипотезы, лучший angle, ЛПР, канал, "
         "первое сообщение и стратегия follow-up."
     )
@@ -721,7 +722,35 @@ async def research_refine_command(update: Update, context: ContextTypes.DEFAULT_
     if await asyncio.to_thread(RESEARCH_STORE.refine, job_id, update.effective_user.id, refinement):
         await update.effective_message.reply_text(f"Уточнение для {job_id} поставлено в очередь. Будет подготовлен обновлённый отчёт.")
     else:
-        await update.effective_message.reply_text("Уточнять можно только завершённое, отменённое или завершившееся с ошибкой исследование.")
+        await update.effective_message.reply_text("Уточнять можно для завершённого, отменённого, ошибочного исследования или задачи, ожидающей данных.")
+
+
+async def research_input_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    try:
+        _, action, job_id = (query.data or "").split(":", 2)
+    except ValueError:
+        return ConversationHandler.END
+    if action != "provide" or not await asyncio.to_thread(RESEARCH_STORE.get, job_id, update.effective_user.id):
+        await query.edit_message_text("Задача не найдена или больше недоступна.")
+        return ConversationHandler.END
+    context.user_data["research_input_job_id"] = job_id
+    await query.message.reply_text("Пришли уточнения: ссылку на сайт/вакансию, название компании, описание бизнеса или любой полезный контекст.")
+    return RESEARCH_INPUT_VALUE
+
+
+async def research_input_value(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    job_id = str(context.user_data.pop("research_input_job_id", ""))
+    refinement = (update.effective_message.text or "").strip()
+    if not job_id or not refinement:
+        await update.effective_message.reply_text("Не получил уточнений. Нажми кнопку ещё раз, когда будут данные.")
+        return ConversationHandler.END
+    if await asyncio.to_thread(RESEARCH_STORE.refine, job_id, update.effective_user.id, refinement):
+        await update.effective_message.reply_text(f"Спасибо, продолжу research с новыми данными. /research_status {job_id}")
+    else:
+        await update.effective_message.reply_text("Не удалось продолжить эту задачу.")
+    return ConversationHandler.END
 
 
 def _scheduled_timezone() -> ZoneInfo:
