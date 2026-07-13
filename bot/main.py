@@ -6,7 +6,7 @@ import os
 import sys
 import urllib.error
 import urllib.request
-from datetime import datetime, time
+from datetime import datetime, time, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -43,7 +43,8 @@ load_dotenv()
 from bot.access import admin_required, init_access_db, member_required  # noqa: E402
 from bot.telegram_user import TelegramUserService  # noqa: E402
 from bot.telegram_web import TelegramTwoFactorServer  # noqa: E402
-from notion_store import find_contacts, get_contacts_with_next_step_on, list_team_members  # noqa: E402
+from notion_store import find_contacts, get_contacts_with_next_step_on, list_team_members, list_followups_for_contacts, stop_contact_followups, update_followup  # noqa: E402
+from followups import FollowupSuggestionStore, generate_followup_sequence  # noqa: E402
 from notion_store import get_contact_status_options  # noqa: E402
 from insights import analyze_contact_status  # noqa: E402
 from bot.handlers import (  # noqa: E402
@@ -73,6 +74,7 @@ from bot.handlers import (  # noqa: E402
     SCHEDULE_MINUTE,
     SCHEDULE_RECIPIENT,
     SCHEDULE_TEXT,
+    FOLLOWUP_EDIT_TEXT,
     SEGMENT,
     SUBJECT,
     add_member_cmd,
@@ -141,6 +143,9 @@ from bot.handlers import (  # noqa: E402
     scheduled_messages_command,
     scheduled_recipient,
     scheduled_text,
+    followup_callback,
+    followup_edit_entry,
+    followup_edit_value,
     set_summary_chat,
     start,
     stats,
@@ -327,6 +332,15 @@ def main() -> None:
     )
     app.add_handler(
         ConversationHandler(
+            entry_points=[CallbackQueryHandler(member_required(followup_edit_entry), pattern=r"^followup:edit:[^:]+:[123]$")],
+            states={FOLLOWUP_EDIT_TEXT: [MessageHandler(filters.TEXT & ~filters.COMMAND, member_required(followup_edit_value))]},
+            fallbacks=[CommandHandler("cancel", member_required(scheduled_cancel_flow))],
+            name="followup_edit_flow",
+            persistent=True,
+        )
+    )
+    app.add_handler(
+        ConversationHandler(
             entry_points=[
                 CommandHandler("schedule_message", member_required(schedule_message_command)),
                 CallbackQueryHandler(member_required(scheduled_edit_entry), pattern=r"^scheduled:edit:(time|recipient|text):"),
@@ -392,6 +406,7 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(member_required(contact_status_suggestion_callback), pattern=r"^status_suggestion:"))
     app.add_handler(CallbackQueryHandler(member_required(research_callback), pattern=r"^research:"))
     app.add_handler(CallbackQueryHandler(member_required(scheduled_callback), pattern=r"^scheduled:"))
+    app.add_handler(CallbackQueryHandler(member_required(followup_callback), pattern=r"^followup:"))
     app.add_handler(ChatMemberHandler(remember_bot_chat_member, ChatMemberHandler.MY_CHAT_MEMBER))
     app.add_handler(MessageHandler(filters.ChatType.GROUPS, remember_group), group=10)
     app.add_handler(MessageHandler(filters.Document.PDF | filters.Document.FileExtension("docx"), member_required(research_document_handler)), group=1)
@@ -399,6 +414,7 @@ def main() -> None:
     schedule_next_step_reminders(app)
     schedule_conversation_archives(app)
     schedule_scheduled_messages(app)
+    schedule_followup_suggestions(app)
 
     logger.info("Interview bot starting")
     app.run_polling()
@@ -464,6 +480,11 @@ def schedule_scheduled_messages(app: Application) -> None:
     app.job_queue.run_repeating(scheduled_messages_job, interval=interval, first=10, name="scheduled_messages")
 
 
+def schedule_followup_suggestions(app: Application) -> None:
+    interval = max(900, int(os.getenv("FOLLOWUP_SCAN_SECONDS", "3600")))
+    app.job_queue.run_repeating(followup_suggestions_job, interval=interval, first=45, name="followup_suggestions")
+
+
 async def scheduled_messages_job(context) -> None:
     service = getattr(context.application, "_telegram_user_service", None)
     if service is None:
@@ -472,6 +493,8 @@ async def scheduled_messages_job(context) -> None:
     for item in due:
         token = str(item["token"])
         try:
+            if item.get("notion_followup_id"):
+                await asyncio.to_thread(update_followup, followup_id=str(item["notion_followup_id"]), status="Ждёт подтверждения отправки")
             when = datetime.fromisoformat(str(item["scheduled_at"])).astimezone(ZoneInfo(os.getenv("SCHEDULED_MESSAGES_TIMEZONE", "Europe/Moscow")))
             text = (
                 f"<b>Время отправки пришло</b>\n\n"
@@ -486,6 +509,67 @@ async def scheduled_messages_job(context) -> None:
             )
         except Exception:
             logger.exception("Unable to request confirmation for scheduled message %s", token)
+
+
+def _followup_recipient(contact: dict) -> str:
+    candidate = str(contact.get("telegram") or contact.get("contact") or "").strip()
+    if candidate.startswith("@") or candidate.startswith("https://t.me/") or candidate.startswith("http://t.me/") or candidate.lstrip("-").isdigit():
+        return candidate
+    return ""
+
+
+def _new_enough_contact(contact: dict) -> bool:
+    days = max(1, int(os.getenv("FOLLOWUP_CONTACT_LOOKBACK_DAYS", "14")))
+    raw = str(contact.get("created_at") or "")
+    try:
+        created = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    return created >= datetime.now(created.tzinfo) - timedelta(days=days)
+
+
+async def followup_suggestions_job(context) -> None:
+    """Propose a three-touch sequence for fresh Contacts that have no active follow-ups."""
+    service = getattr(context.application, "_telegram_user_service", None)
+    if service is None or not os.getenv("NOTION_FOLLOW_UPS_DB_ID"):
+        return
+    store = FollowupSuggestionStore()
+    eligible = {item.strip() for item in os.getenv("FOLLOWUP_CONTACT_STATUSES", "Новый,Написали,No response").split(",") if item.strip()}
+    for member in await asyncio.to_thread(list_team_members):
+        try:
+            user_id = int(member.get("telegram_user_id") or "")
+        except (TypeError, ValueError):
+            continue
+        if not service.status(user_id).get("connected"):
+            continue
+        try:
+            contacts = await asyncio.to_thread(find_contacts, member_page_id=member["id"], limit=1000)
+            existing = await asyncio.to_thread(list_followups_for_contacts, [str(item["id"]) for item in contacts])
+            for contact in contacts:
+                contact_id = str(contact["id"])
+                active = [item for item in existing.get(contact_id, []) if item.get("status") in {"Черновик", "На согласовании", "Запланировано", "Ждёт подтверждения отправки", "Отправляется"}]
+                if contact.get("status") not in eligible:
+                    if active:
+                        await asyncio.to_thread(stop_contact_followups, contact_id, "Статус контакта больше не требует follow-up")
+                        await asyncio.to_thread(service.cancel_scheduled_messages_for_contact, user_id, contact_id)
+                    continue
+                # Only contacts without an existing chain are eligible. This avoids
+                # adding three more touches to a manually planned sequence.
+                if active or not _new_enough_contact(contact):
+                    continue
+                recipient = _followup_recipient(contact)
+                if not recipient or store.has_suggestion(contact_id, user_id):
+                    continue
+                history = service.contact_messages(user_id, contact_id, limit=60)
+                payload = await asyncio.to_thread(generate_followup_sequence, contact, history)
+                payload.update({"recipient": recipient, "contact_name": contact.get("name") or ""})
+                suggestion = store.create(contact_id, str(member["id"]), user_id, payload)
+                if not suggestion:
+                    continue
+                from bot.handlers import _followup_proposal_buttons, _followup_proposal_text
+                await context.bot.send_message(chat_id=user_id, text=_followup_proposal_text(payload["contact_name"], payload), parse_mode="HTML", reply_markup=_followup_proposal_buttons(suggestion["token"]))
+        except Exception:
+            logger.exception("Unable to prepare follow-up suggestions for member %s", member.get("id"))
 
 
 async def conversation_archives_job(context) -> None:

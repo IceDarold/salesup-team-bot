@@ -35,6 +35,7 @@ from notion_store import (
     get_contact_form_options,
     get_contact_stats,
     update_contact_status,
+    update_followup,
     get_scheduled_interviews_for_member,
     list_team_members,
 )
@@ -65,6 +66,8 @@ RESEARCH_PREFIX = "research:"
 RESEARCH_STORE = ResearchJobStore()
 SCHEDULED_PREFIX = "scheduled:"
 SCHEDULED_TIMEZONE = os.getenv("SCHEDULED_MESSAGES_TIMEZONE", "Europe/Moscow")
+FOLLOWUP_PREFIX = "followup:"
+FOLLOWUP_EDIT_TEXT = 330
 
 (
     NAME,
@@ -772,6 +775,7 @@ async def scheduled_minute_callback(update: Update, context: ContextTypes.DEFAUL
     if not item:
         await query.edit_message_text("Не удалось сохранить время. Начни заново: /schedule_message")
         return ConversationHandler.END
+    await _sync_scheduled_followup(item)
     await query.edit_message_text(_scheduled_card(item), parse_mode="HTML", reply_markup=_scheduled_buttons(item["token"]))
     return ConversationHandler.END
 
@@ -815,20 +819,25 @@ async def scheduled_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await query.edit_message_text(_scheduled_card(item), parse_mode="HTML", reply_markup=_scheduled_buttons(token, awaiting_confirmation=item["status"] == "awaiting_confirmation"))
     elif action == "cancel":
         service.cancel_scheduled_message(token, user_id)
+        await _sync_scheduled_followup(item, status="Отменено", stop_reason="Отменено пользователем")
         await query.edit_message_text("Запланированное сообщение отменено.")
     elif action == "decline":
         service.decline_scheduled_message(token, user_id)
+        await _sync_scheduled_followup(item, status="Пропущено", stop_reason="Пользователь не подтвердил отправку")
         await query.edit_message_text("Понял, это сообщение отправлено не будет.")
     elif action == "send":
         if not service.begin_scheduled_message_send(token, user_id):
             await query.edit_message_text("Это сообщение уже отправляется, отправлено или отменено.")
             return
+        await _sync_scheduled_followup(item, status="Отправляется")
         try:
             message_id = await service.send_message(user_id, str(item["recipient"]), str(item["text"]))
             service.mark_scheduled_message_sent(token, user_id, message_id)
+            await _sync_scheduled_followup(item, status="Отправлено", sent_at=datetime.now(timezone.utc))
         except Exception as exc:
             logger.exception("Unable to send scheduled message %s", token)
             service.restore_scheduled_message_confirmation(token, user_id, str(exc))
+            await _sync_scheduled_followup(item, status="Ошибка", error=str(exc))
             await query.edit_message_text(f"Не удалось отправить сообщение: {exc}")
             return
         await query.edit_message_text("Сообщение отправлено через ваш личный Telegram.")
@@ -868,6 +877,113 @@ async def scheduled_edit_value(update: Update, context: ContextTypes.DEFAULT_TYP
         await update.effective_message.reply_text("Не удалось изменить сообщение: оно уже недоступно.")
         return ConversationHandler.END
     await update.effective_message.reply_text(_scheduled_card(item), parse_mode="HTML", reply_markup=_scheduled_buttons(item["token"]))
+    await _sync_scheduled_followup(item)
+    return ConversationHandler.END
+
+
+async def _sync_scheduled_followup(item: dict, *, status: str | None = None, sent_at: datetime | None = None,
+                                   stop_reason: str | None = None, error: str | None = None) -> None:
+    """Best-effort mirror for Follow-ups rows. Manual schedules have no Notion id."""
+    followup_id = str(item.get("notion_followup_id") or "")
+    if not followup_id:
+        return
+    try:
+        scheduled_at = datetime.fromisoformat(str(item["scheduled_at"]))
+        await asyncio.to_thread(
+            update_followup, followup_id=followup_id, status=status, scheduled_at=scheduled_at,
+            text=str(item.get("text") or ""), recipient=str(item.get("recipient") or ""),
+            sent_at=sent_at, stop_reason=stop_reason, error=error,
+        )
+    except Exception:
+        logger.exception("Unable to synchronize Follow-up %s", followup_id)
+
+
+def _followup_proposal_text(contact_name: str, payload: dict) -> str:
+    rows = []
+    for item in payload.get("messages", []):
+        when = datetime.fromisoformat(str(item["scheduled_at"])).astimezone(_scheduled_timezone())
+        rows.append(
+            f"<b>{item['sequence']}. {when.strftime('%d.%m.%Y %H:%M')}</b> — {html.escape(str(item.get('reason') or 'follow-up'))}\n"
+            f"{html.escape(str(item.get('text') or ''))}"
+        )
+    return f"<b>Предлагаю 3 follow-up для {html.escape(contact_name or 'контакта')}</b>\n\n" + "\n\n".join(rows) + "\n\nПеред постановкой можно отредактировать каждый текст."
+
+
+def _followup_proposal_buttons(token: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ Запланировать все", callback_data=f"{FOLLOWUP_PREFIX}accept:{token}")],
+        [InlineKeyboardButton("✏️ 1", callback_data=f"{FOLLOWUP_PREFIX}edit:{token}:1"), InlineKeyboardButton("✏️ 2", callback_data=f"{FOLLOWUP_PREFIX}edit:{token}:2"), InlineKeyboardButton("✏️ 3", callback_data=f"{FOLLOWUP_PREFIX}edit:{token}:3")],
+        [InlineKeyboardButton("Не предлагать", callback_data=f"{FOLLOWUP_PREFIX}reject:{token}")],
+    ])
+
+
+async def followup_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+    parts = (query.data or "").split(":")
+    if len(parts) != 3:
+        return
+    _, action, token = parts
+    from followups import FollowupSuggestionStore
+    suggestion = FollowupSuggestionStore().get(token, update.effective_user.id)
+    if not suggestion:
+        await query.edit_message_text("Это предложение уже обработано или устарело.")
+        return
+    if action == "reject":
+        FollowupSuggestionStore().resolve(token, update.effective_user.id, "rejected")
+        await query.edit_message_text("Хорошо, follow-up для этого контакта не будут предложены повторно.")
+        return
+    if action != "accept":
+        return
+    payload = suggestion["payload"]
+    from notion_store import create_followup
+    service = _telegram_user_service(context)
+    try:
+        for message in payload["messages"]:
+            when = datetime.fromisoformat(str(message["scheduled_at"]))
+            row = await asyncio.to_thread(create_followup, contact_id=suggestion["contact_id"], owner_id=suggestion["owner_id"], recipient=payload["recipient"], text=message["text"], scheduled_at=when, sequence=int(message["sequence"]))
+            local = service.create_scheduled_message(update.effective_user.id, payload["recipient"], message["text"], when, contact_id=suggestion["contact_id"], notion_followup_id=row["id"])
+            await asyncio.to_thread(update_followup, followup_id=row["id"], telegram_schedule_id=str(local["token"]))
+    except Exception:
+        logger.exception("Unable to create accepted follow-ups")
+        await query.edit_message_text("Не удалось поставить цепочку. Ничего не подтверждено — попробуй ещё раз позже.")
+        return
+    FollowupSuggestionStore().resolve(token, update.effective_user.id, "accepted")
+    await query.edit_message_text("Готово: три follow-up появились в Notion и в /scheduled_messages. В момент каждой отправки бот запросит подтверждение.")
+
+
+async def followup_edit_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    parts = (query.data or "").split(":")
+    if len(parts) != 4:
+        return ConversationHandler.END
+    _, _, token, sequence = parts
+    from followups import FollowupSuggestionStore
+    suggestion = FollowupSuggestionStore().get(token, update.effective_user.id)
+    if not suggestion:
+        await query.edit_message_text("Предложение уже недоступно.")
+        return ConversationHandler.END
+    context.user_data["followup_edit"] = {"token": token, "sequence": int(sequence)}
+    await query.message.reply_text(f"Пришли новый текст для follow-up #{sequence}.")
+    return FOLLOWUP_EDIT_TEXT
+
+
+async def followup_edit_value(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    edit = context.user_data.pop("followup_edit", {})
+    text = (update.effective_message.text or "").strip()
+    from followups import FollowupSuggestionStore
+    suggestion = FollowupSuggestionStore().get(str(edit.get("token") or ""), update.effective_user.id)
+    if not edit or not text or not suggestion:
+        await update.effective_message.reply_text("Не получилось изменить предложение.")
+        return ConversationHandler.END
+    payload = suggestion["payload"]
+    for message in payload.get("messages", []):
+        if int(message.get("sequence", 0)) == int(edit["sequence"]):
+            message["text"] = text
+            break
+    FollowupSuggestionStore().update_payload(edit["token"], update.effective_user.id, payload)
+    await update.effective_message.reply_text(_followup_proposal_text(str(payload.get("contact_name") or ""), payload), parse_mode="HTML", reply_markup=_followup_proposal_buttons(edit["token"]))
     return ConversationHandler.END
 
 

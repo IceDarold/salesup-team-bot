@@ -93,8 +93,11 @@ class TelegramUserService:
                 token TEXT PRIMARY KEY, telegram_user_id INTEGER NOT NULL, recipient TEXT NOT NULL,
                 text TEXT NOT NULL, scheduled_at TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'scheduled',
                 confirmation_requested_at TEXT, sent_at TEXT, telegram_message_id INTEGER,
-                last_error TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL)"""
+                last_error TEXT NOT NULL DEFAULT '', contact_id TEXT NOT NULL DEFAULT '',
+                notion_followup_id TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL)"""
             )
+            self._ensure_column("telegram_scheduled_messages", "contact_id", "TEXT NOT NULL DEFAULT ''")
+            self._ensure_column("telegram_scheduled_messages", "notion_followup_id", "TEXT NOT NULL DEFAULT ''")
             self._db.execute(
                 "CREATE INDEX IF NOT EXISTS idx_scheduled_messages_due ON telegram_scheduled_messages(status, scheduled_at)"
             )
@@ -306,15 +309,16 @@ class TelegramUserService:
             message = await client.send_message(_recipient(recipient), text.strip())
         return int(message.id)
 
-    def create_scheduled_message(self, telegram_user_id: int, recipient: str, text: str, scheduled_at: datetime) -> dict:
+    def create_scheduled_message(self, telegram_user_id: int, recipient: str, text: str, scheduled_at: datetime,
+                                 *, contact_id: str = "", notion_followup_id: str = "") -> dict:
         token = secrets.token_urlsafe(8)
         now = datetime.now(timezone.utc).isoformat()
         with self._lock, self._db:
             self._db.execute(
                 """INSERT INTO telegram_scheduled_messages
-                (token, telegram_user_id, recipient, text, scheduled_at, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                (token, telegram_user_id, recipient.strip(), text.strip(), scheduled_at.astimezone(timezone.utc).isoformat(), now, now),
+                (token, telegram_user_id, recipient, text, scheduled_at, contact_id, notion_followup_id, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (token, telegram_user_id, recipient.strip(), text.strip(), scheduled_at.astimezone(timezone.utc).isoformat(), contact_id, notion_followup_id, now, now),
             )
         return self.get_scheduled_message(token, telegram_user_id) or {}
 
@@ -409,10 +413,28 @@ class TelegramUserService:
             )
         return bool(result.rowcount)
 
+    def cancel_scheduled_messages_for_contact(self, telegram_user_id: int, contact_id: str) -> list[str]:
+        """Cancel pending local jobs and return their linked Notion Follow-ups IDs."""
+        with self._lock, self._db:
+            rows = self._db.execute(
+                "SELECT notion_followup_id FROM telegram_scheduled_messages WHERE telegram_user_id=? AND contact_id=? AND status IN ('scheduled','awaiting_confirmation','failed')",
+                (telegram_user_id, contact_id),
+            ).fetchall()
+            self._db.execute(
+                "UPDATE telegram_scheduled_messages SET status='cancelled', updated_at=? WHERE telegram_user_id=? AND contact_id=? AND status IN ('scheduled','awaiting_confirmation','failed')",
+                (datetime.now(timezone.utc).isoformat(), telegram_user_id, contact_id),
+            )
+        return [str(row["notion_followup_id"]) for row in rows if row["notion_followup_id"]]
+
     async def close(self) -> None:
         for user_id in list(self._pending):
             await self._discard_pending(user_id)
         self._db.close()
+
+    def _ensure_column(self, table: str, column: str, definition: str) -> None:
+        columns = {str(row[1]) for row in self._db.execute(f"PRAGMA table_info({table})").fetchall()}
+        if column not in columns:
+            self._db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
     def _ensure_conversation(self, telegram_user_id: int, contact: dict, chat_id: int) -> None:
         with self._lock, self._db:

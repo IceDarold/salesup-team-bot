@@ -17,6 +17,8 @@ NOTION_VERSION = "2022-06-28"
 SCHEDULED_STATUS = "Sheduled"
 INTERVIEWER_FEEDBACK_PROPERTY = "Interviewer feedback"
 CONTACT_CONVERSATION_PROPERTY = "Переписка"
+FOLLOW_UPS_DB_ID_ENV = "NOTION_FOLLOW_UPS_DB_ID"
+FOLLOW_UPS_ACTIVE_STATUSES = {"Черновик", "На согласовании", "Запланировано", "Ждёт подтверждения отправки", "Отправляется"}
 NOTION_MAX_RETRIES = int(os.getenv("NOTION_MAX_RETRIES", "3"))
 NOTION_RETRY_BACKOFF_SECONDS = float(os.getenv("NOTION_RETRY_BACKOFF_SECONDS", "1.5"))
 STATS_TIMEZONE = os.getenv("STATS_TIMEZONE", "Asia/Nicosia")
@@ -235,6 +237,67 @@ def find_contacts(
     return contacts
 
 
+def list_followups_for_contacts(contact_ids: list[str]) -> dict[str, list[dict]]:
+    """Return all Follow-ups grouped by related Contacts records."""
+    if not contact_ids:
+        return {}
+    db_id = _followups_db_id()
+    pages = _NotionClient().query_database_all(db_id, {"page_size": 100}).get("results", [])
+    wanted = set(contact_ids)
+    grouped: dict[str, list[dict]] = {contact_id: [] for contact_id in wanted}
+    for page in pages:
+        item = _followup_from_page(page)
+        for contact_id in item["contact_ids"]:
+            if contact_id in grouped:
+                grouped[contact_id].append(item)
+    return grouped
+
+
+def create_followup(*, contact_id: str, owner_id: str, recipient: str, text: str, scheduled_at: datetime, sequence: int, source: str = "AI follow-up") -> dict:
+    client = _NotionClient()
+    properties = {
+        "Название": _title(f"Follow-up #{sequence} — {recipient}"),
+        "Контакт": _relation(contact_id),
+        "Ответственный": _relation(owner_id),
+        "Канал": {"select": {"name": "Telegram"}},
+        "Получатель": _rich_text(recipient),
+        "Текст сообщения": _rich_text(text),
+        "Запланировано на": {"date": {"start": scheduled_at.isoformat()}},
+        "Статус": {"status": {"name": "Запланировано"}},
+        "№ касания": {"number": sequence},
+        "Источник": {"select": {"name": source}},
+        "Создано ботом": {"checkbox": True},
+    }
+    page = client.create_page(_followups_db_id(), properties)
+    return _followup_from_page(page)
+
+
+def update_followup(*, followup_id: str, status: str | None = None, scheduled_at: datetime | None = None,
+                    text: str | None = None, recipient: str | None = None, telegram_schedule_id: str | None = None,
+                    sent_at: datetime | None = None, error: str | None = None, stop_reason: str | None = None) -> None:
+    properties = {
+        "Статус": {"status": {"name": status}} if status else None,
+        "Запланировано на": {"date": {"start": scheduled_at.isoformat()}} if scheduled_at else None,
+        "Текст сообщения": _rich_text(text) if text is not None else None,
+        "Получатель": _rich_text(recipient) if recipient is not None else None,
+        "Telegram Schedule ID": _rich_text(telegram_schedule_id) if telegram_schedule_id is not None else None,
+        "Отправлено в": {"date": {"start": sent_at.isoformat()}} if sent_at else None,
+        "Ошибка": _rich_text(error) if error is not None else None,
+        "Причина остановки": _rich_text(stop_reason) if stop_reason is not None else None,
+    }
+    _NotionClient().update_page(followup_id, properties)
+
+
+def stop_contact_followups(contact_id: str, reason: str) -> list[str]:
+    stopped = []
+    for item in list_followups_for_contacts([contact_id]).get(contact_id, []):
+        if item.get("status") not in FOLLOW_UPS_ACTIVE_STATUSES:
+            continue
+        update_followup(followup_id=item["id"], status="Неактуально", stop_reason=reason)
+        stopped.append(item["id"])
+    return stopped
+
+
 def get_contacts_with_next_step_on(target_date: date) -> list[dict]:
     """Return contacts whose `Дата` is today and have a non-empty next step."""
     response = _NotionClient().query_database_all(
@@ -371,6 +434,13 @@ def _contacts_db_id() -> str:
     db_id = os.getenv("NOTION_CONTACTS_DB_ID")
     if not db_id:
         raise RuntimeError("NOTION_CONTACTS_DB_ID environment variable is not set.")
+    return db_id
+
+
+def _followups_db_id() -> str:
+    db_id = os.getenv(FOLLOW_UPS_DB_ID_ENV, "").strip()
+    if not db_id:
+        raise RuntimeError(f"{FOLLOW_UPS_DB_ID_ENV} environment variable is not set.")
     return db_id
 
 
@@ -971,6 +1041,18 @@ def _contact_from_page(page: dict) -> dict:
         "source": _prop_select(props.get("Источник")),
         "owner_ids": _prop_relation(props.get("Owner")),
         "last_touch": _prop_date(props.get("Последнее касание")),
+        "created_at": page.get("created_time", ""),
+    }
+
+
+def _followup_from_page(page: dict) -> dict:
+    props = page.get("properties", {})
+    return {
+        "id": page.get("id", ""), "contact_ids": _prop_relation(props.get("Контакт")),
+        "owner_ids": _prop_relation(props.get("Ответственный")), "recipient": _prop_text(props.get("Получатель")),
+        "text": _prop_text(props.get("Текст сообщения")), "scheduled_at": _prop_date(props.get("Запланировано на")),
+        "status": _prop_status(props.get("Статус")), "sequence": _prop_number(props.get("№ касания")),
+        "telegram_schedule_id": _prop_text(props.get("Telegram Schedule ID")),
     }
 
 
@@ -1080,6 +1162,15 @@ def _prop_select(prop: dict | None) -> str:
         return ""
     value = prop.get("select") or prop.get("status") or {}
     return value.get("name", "")
+
+
+def _prop_number(prop: dict | None) -> int:
+    if not prop or prop.get("number") is None:
+        return 0
+    try:
+        return int(prop["number"])
+    except (TypeError, ValueError):
+        return 0
 
 
 def _prop_as_text(prop: dict | None) -> str:
