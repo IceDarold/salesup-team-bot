@@ -42,3 +42,28 @@ def recommend_next_action(contact: dict, messages: list[dict]) -> dict:
     prompt = {"contact": contact, "conversation": transcript, "task": "Верни JSON {next_action, due_date_iso_or_empty, rationale, draft_message, evidence:[...]}. Не предлагай отправку, если данных недостаточно. Следующее действие и черновик должны быть конкретными, на русском, с опорой на evidence."}
     result = _client().chat.completions.create(model=os.getenv("SALES_ACTION_MODEL", "gpt-5.6-terra"), messages=[{"role":"system","content":"Ты осторожный sales-ассистент. Только JSON."},{"role":"user","content":json.dumps(prompt, ensure_ascii=False)}], temperature=0.2)
     return _json(result.choices[0].message.content)
+
+
+def research_company_brief(request: str) -> str:
+    """Run a multi-angle, source-grounded company and vacancy research task."""
+    prompt = """Ты senior B2B research и sales strategist. Пользователь дал ссылки и свободный контекст о компании/вакансии.
+Проведи максимально глубокий web research: официальный сайт, вакансия, продукт, рынок, новости, основатель и команда, история, клиенты, конкуренты, публичные интервью, отзывы и технологический стек. Не утверждай, что нашёл всё в интернете; явно отмечай пробелы.
+
+Верни подробный отчёт на русском в Markdown со следующими разделами:
+1. Executive summary.
+2. Компания и история: факты, основатель, продукт, рынок, динамика.
+3. Разбор вакансии: обязанности, KPI, скрытые сигналы, что это говорит о задачах бизнеса.
+4. Подтверждённые боли и возможности автоматизации: каждая боль = наблюдение, доказательство/цитата, ссылка-источник, степень уверенности, конкретная идея автоматизации.
+5. ICP и карта стейкхолдеров: кому писать, роль каждого, порядок контактов.
+6. Стратегия продажи: гипотеза ценности, персонализация, каналы, последовательность касаний на 30 дней, возражения и ответы.
+7. Три варианта первого сообщения: короткое, экспертное, value-first.
+8. Риски и что нужно проверить в следующем разговоре.
+9. Список источников с прямыми URL.
+
+Каждый факт о компании или человеке подтверждай ссылкой рядом с утверждением. Не выдумывай личные контакты, цифры, клиентов или источники. Используй несколько поисковых запросов и сначала первичные источники."""
+    response = _client().responses.create(
+        model=os.getenv("COMPANY_RESEARCH_MODEL", "gpt-5.6-terra"),
+        tools=[{"type": "web_search"}],
+        input=f"{prompt}\n\nЗапрос пользователя:\n{request}",
+    )
+    return str(response.output_text or "").strip()

@@ -22,6 +22,7 @@ DEFAULT_OAUTH_CLIENT_PATH = Path(__file__).parent / ".secrets" / "google-oauth-c
 DEFAULT_OAUTH_TOKEN_PATH = Path(__file__).parent / ".secrets" / "google-oauth-token.json"
 DOC_ID = os.getenv("GOOGLE_DOC_ID", "1wDR5jAx7Y8rQetmdY1WyHSvtyZYKM0n-qdWEuSLVe_s")
 CONVERSATION_DOC_ID = os.getenv("GOOGLE_CONVERSATION_DOC_ID", "1zs57P-lBgM8oBOajx2SfbbKwjrbrdfJk1GZAKrYdO8Q")
+RESEARCH_DOC_ID = os.getenv("GOOGLE_RESEARCH_DOC_ID", CONVERSATION_DOC_ID)
 CREDS_PATH = Path(os.getenv("GOOGLE_APPLICATION_CREDENTIALS", str(DEFAULT_CREDS_PATH)))
 OAUTH_CLIENT_PATH = Path(os.getenv("GOOGLE_OAUTH_CLIENT_SECRET", str(DEFAULT_OAUTH_CLIENT_PATH)))
 OAUTH_TOKEN_PATH = Path(os.getenv("GOOGLE_OAUTH_TOKEN", str(DEFAULT_OAUTH_TOKEN_PATH)))
@@ -366,6 +367,21 @@ def append_conversation_messages(tab_id: str, messages: list[dict]) -> None:
 
 def delete_conversation_tab_by_id(tab_id: str) -> None:
     _delete_tab(_get_service(), tab_id, CONVERSATION_DOC_ID)
+
+
+def create_company_research_tab(title: str, report: str) -> str:
+    """Save a source-grounded company research report as a dedicated Google Docs tab."""
+    service = _get_service()
+    tab_title = _unique_tab_title(service, _sanitize_title(f"Research — {title}")[:100], RESEARCH_DOC_ID)
+    tab_id = _create_tab(service, tab_title, RESEARCH_DOC_ID)
+    content = f"{tab_title}\n\n{report.strip()}\n"
+    try:
+        _insert_tab_content(service, tab_id, content, RESEARCH_DOC_ID)
+        return f"https://docs.google.com/document/d/{RESEARCH_DOC_ID}/edit?tab={tab_id}"
+    except Exception:
+        with suppress(Exception):
+            _delete_tab(service, tab_id, RESEARCH_DOC_ID)
+        raise
 
 
 def _share_document_by_link(document_id: str) -> None:

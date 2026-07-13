@@ -38,7 +38,8 @@ from notion_store import (
     list_team_members,
 )
 from transcriber import TRANSCRIBE_MODEL, transcribe
-from sales_agent import research_document
+from sales_agent import research_company_brief, research_document
+from google_docs import create_company_research_tab
 
 logger = logging.getLogger(__name__)
 
@@ -475,6 +476,33 @@ async def research_document_handler(update: Update, context: ContextTypes.DEFAUL
 
 async def research_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.effective_message.reply_text("Пришли сюда PDF или DOCX с ресёрчем потенциальных контактов. Я изучу его, проверю данные в открытых источниках и подготовлю карточки с персональными сообщениями.")
+
+
+async def company_research_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.effective_chat and update.effective_chat.type != "private":
+        await update.effective_message.reply_text("Исследование компании доступно только в личном чате с ботом.")
+        return
+    request = " ".join(context.args).strip()
+    if not request:
+        await update.effective_message.reply_text("Использование: /company_research <ссылка на вакансию, сайт компании и любые вводные свободным текстом>")
+        return
+    progress = await update.effective_message.reply_text("Запускаю глубокое исследование: изучаю компанию, вакансию, людей, рынок и публичные источники. Это займёт несколько минут.")
+    asyncio.create_task(_run_company_research(progress, request))
+
+
+async def _run_company_research(progress, request: str) -> None:
+    try:
+        report = await asyncio.to_thread(research_company_brief, request)
+        if not report:
+            raise RuntimeError("Research model returned an empty report.")
+        urls = re.findall(r"https?://[^\s]+", request)
+        title = urllib.parse.urlparse(urls[0]).netloc if urls else "Компания"
+        url = await asyncio.to_thread(create_company_research_tab, title, report)
+    except Exception:
+        logger.exception("Company research failed")
+        await progress.edit_text("Не удалось завершить исследование. Проверь доступность OpenAI API и повтори запрос.")
+        return
+    await progress.edit_text(f"Исследование готово. Полный отчёт с источниками: {url}")
 
 
 async def _send_research_candidate(message, token: str, index: int, candidate: dict) -> None:

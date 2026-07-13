@@ -80,6 +80,7 @@ from bot.handlers import (  # noqa: E402
     cancel_contact,
     contact_custom_segment,
     contact_custom_source,
+    company_research_command,
     contact_status_suggestion_callback,
     contact_name,
     contact_segment,
@@ -162,6 +163,7 @@ COMMANDS = [
     BotCommand("telegram_delete", "Удалить архив контакта"),
     BotCommand("telegram_delete_all", "Удалить все архивы"),
     BotCommand("research", "Пришли PDF с ресёрчем"),
+    BotCommand("company_research", "Глубоко изучить компанию"),
     BotCommand("help", "Помощь"),
     BotCommand("info", "Статус"),
     BotCommand("cancel", "Отменить интервью"),
@@ -326,6 +328,7 @@ def main() -> None:
     app.add_handler(CommandHandler("telegram_delete", member_required(telegram_delete)))
     app.add_handler(CommandHandler("telegram_delete_all", member_required(telegram_delete_all)))
     app.add_handler(CommandHandler("research", member_required(research_command)))
+    app.add_handler(CommandHandler("company_research", member_required(company_research_command)))
     app.add_handler(CommandHandler("add_member", admin_required(add_member_cmd)))
     app.add_handler(CommandHandler("members", admin_required(members_cmd)))
     app.add_handler(CommandHandler("remove_member", admin_required(remove_member_cmd)))
