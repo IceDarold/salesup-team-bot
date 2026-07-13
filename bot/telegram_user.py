@@ -155,6 +155,7 @@ class TelegramUserService:
         matches = 0
         saved = 0
         changed: dict[str, dict] = {}
+        inbound_changed: dict[str, dict] = {}
         async with self._client(telegram_user_id) as client:
             async for dialog in client.iter_dialogs():
                 if not dialog.is_user or getattr(dialog.entity, "bot", False):
@@ -173,10 +174,12 @@ class TelegramUserService:
                     if self._save_message(telegram_user_id, chat_id, contact["id"], message, text=text):
                         saved += 1
                         changed[str(contact["id"])] = contact
+                        if not bool(message.out):
+                            inbound_changed[str(contact["id"])] = contact
                 if await self._backfill_voice_messages(client, telegram_user_id, chat_id, str(contact["id"]), dialog.entity):
                     changed[str(contact["id"])] = contact
         exported = await self._export_pending(telegram_user_id, owner_name)
-        return {"contacts": matches, "messages": saved, "exported": exported, "changed_contacts": list(changed.values())}
+        return {"contacts": matches, "messages": saved, "exported": exported, "changed_contacts": list(changed.values()), "inbound_contacts": list(inbound_changed.values())}
 
     def contact_messages(self, telegram_user_id: int, contact_id: str, limit: int = 500) -> list[dict]:
         with self._lock:

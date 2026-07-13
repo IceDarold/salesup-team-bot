@@ -45,7 +45,7 @@ from bot.access import admin_required, init_access_db, member_required  # noqa: 
 from bot.telegram_user import TelegramUserService  # noqa: E402
 from bot.telegram_web import TelegramTwoFactorServer  # noqa: E402
 from notion_store import find_contacts, get_contacts_with_next_step_on, list_team_members, list_followups_for_contacts, stop_contact_followups, update_followup  # noqa: E402
-from followups import FollowupSuggestionStore, generate_followup_sequence  # noqa: E402
+from followups import FollowupSuggestionStore, generate_adaptive_followup, generate_followup_sequence  # noqa: E402
 from notion_store import get_contact_status_options  # noqa: E402
 from insights import analyze_contact_status  # noqa: E402
 from research_jobs import ResearchJobStore  # noqa: E402
@@ -138,6 +138,7 @@ from bot.handlers import (  # noqa: E402
     research_link_value,
     research_report_command,
     research_status_command,
+    outreach_stats_command,
     schedule_message_command,
     scheduled_callback,
     scheduled_cancel_flow,
@@ -201,6 +202,7 @@ COMMANDS = [
     BotCommand("research_cancel", "Отменить глубокий research"),
     BotCommand("research_report", "Открыть отчёт research"),
     BotCommand("research_refine", "Уточнить завершённый research"),
+    BotCommand("outreach_stats", "Аналитика outreach"),
     BotCommand("schedule_message", "Запланировать личное сообщение"),
     BotCommand("scheduled_messages", "Запланированные сообщения"),
     BotCommand("help", "Помощь"),
@@ -408,6 +410,7 @@ def main() -> None:
     app.add_handler(CommandHandler("research_cancel", member_required(research_cancel_command)))
     app.add_handler(CommandHandler("research_report", member_required(research_report_command)))
     app.add_handler(CommandHandler("research_refine", member_required(research_refine_command)))
+    app.add_handler(CommandHandler("outreach_stats", member_required(outreach_stats_command)))
     app.add_handler(CommandHandler("scheduled_messages", member_required(scheduled_messages_command)))
     app.add_handler(CommandHandler("add_member", admin_required(add_member_cmd)))
     app.add_handler(CommandHandler("members", admin_required(members_cmd)))
@@ -542,8 +545,9 @@ async def scheduled_messages_job(context) -> None:
     for item in due:
         token = str(item["token"])
         try:
+            item = await _refresh_due_followup(item, service)
             if item.get("notion_followup_id"):
-                await asyncio.to_thread(update_followup, followup_id=str(item["notion_followup_id"]), status="Ждёт подтверждения отправки")
+                await asyncio.to_thread(update_followup, followup_id=str(item["notion_followup_id"]), status="Ждёт подтверждения отправки", text=str(item.get("text") or ""))
             when = datetime.fromisoformat(str(item["scheduled_at"])).astimezone(ZoneInfo(os.getenv("SCHEDULED_MESSAGES_TIMEZONE", "Europe/Moscow")))
             text = (
                 f"<b>Время отправки пришло</b>\n\n"
@@ -558,6 +562,32 @@ async def scheduled_messages_job(context) -> None:
             )
         except Exception:
             logger.exception("Unable to request confirmation for scheduled message %s", token)
+
+
+async def _refresh_due_followup(item: dict, service) -> dict:
+    """Use fresh history immediately before confirmation; never block a human review on a refresh failure."""
+    contact_id = str(item.get("contact_id") or "")
+    if not contact_id or not item.get("notion_followup_id"):
+        return item
+    try:
+        member = next((x for x in await asyncio.to_thread(list_team_members) if str(x.get("telegram_user_id") or "") == str(item["telegram_user_id"])), None)
+        if not member:
+            return item
+        contacts = await asyncio.to_thread(find_contacts, member_page_id=member["id"], limit=1000)
+        contact = next((x for x in contacts if str(x.get("id")) == contact_id), None)
+        if not contact or contact.get("status") not in {"Новый", "Написали", "No response"} or not contact.get("research_url"):
+            return item
+        messages = service.contact_messages(int(item["telegram_user_id"]), contact_id, limit=80)
+        if any(not bool(message.get("outgoing")) for message in messages[-5:]):
+            return item
+        research_job = await asyncio.to_thread(ResearchJobStore().latest_for_contact, contact_id)
+        research = json.loads(str(research_job.get("report") or "{}")) if research_job else {}
+        text = await asyncio.to_thread(generate_adaptive_followup, contact, messages, research, "Добавить новый полезный угол или вопрос", str(item["text"]))
+        updated = service.update_scheduled_message(str(item["token"]), int(item["telegram_user_id"]), text=text)
+        return updated or item
+    except Exception:
+        logger.info("Could not refresh follow-up %s; using approved draft", item.get("token"), exc_info=True)
+        return item
 
 
 def _followup_recipient(contact: dict) -> str:
@@ -653,6 +683,15 @@ async def conversation_archives_job(context) -> None:
         try:
             contacts = await asyncio.to_thread(find_contacts, member_page_id=member.get("id"), limit=1000)
             sync_result = await service.sync_archive(user_id, contacts, member.get("name", ""))
+            # A real inbound reply ends the automated sequence before any LLM
+            # classification: never send another follow-up over a reply.
+            for contact in sync_result.get("inbound_contacts", []):
+                contact_id = str(contact.get("id") or "")
+                if not contact_id:
+                    continue
+                stopped_ids = await asyncio.to_thread(service.cancel_scheduled_messages_for_contact, user_id, contact_id)
+                await asyncio.to_thread(stop_contact_followups, contact_id, "Получен ответ контакта")
+                await asyncio.to_thread(ResearchJobStore().record_outreach_event, contact_id, "inbound_reply", {"cancelled_followups": len(stopped_ids)})
             statuses = await asyncio.to_thread(get_contact_status_options)
             for contact in sync_result.get("changed_contacts", []):
                 messages = service.contact_messages(user_id, contact["id"], limit=CONTACT_STATUS_MAX_MESSAGES)

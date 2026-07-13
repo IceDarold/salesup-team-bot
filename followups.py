@@ -101,3 +101,21 @@ def generate_followup_sequence(contact: dict, messages: list[dict], research: di
         item["sequence"] = index
         item["scheduled_at"] = (base + timedelta(days=2 * index)).isoformat()
     return {"messages": messages}
+
+
+def generate_adaptive_followup(contact: dict, messages: list[dict], research: dict, direction: str, previous_text: str) -> str:
+    """Refresh one touch immediately before human confirmation, using live history."""
+    from openai import OpenAI
+    key = os.getenv("OPENAI_API_KEY", "")
+    if not key:
+        raise RuntimeError("OPENAI_API_KEY is not set.")
+    transcript = "\n".join(f"{'Менеджер' if item.get('outgoing') else 'Контакт'}: {item.get('text') or item.get('media') or ''}" for item in messages[-80:])
+    prompt = {"contact": contact, "research": research, "conversation": transcript, "planned_direction": direction,
+              "previous_draft": previous_text,
+              "task": "Перепиши только следующий follow-up на русском с учётом всей истории. Не отправляй, если был ответ контакта. Добавь новый факт/вопрос/пользу, не повторяй предыдущие касания, используй только подтверждённые факты. Верни JSON {text:'', should_send:true|false, reason:''}."}
+    response = OpenAI(api_key=key).chat.completions.create(model=os.getenv("FOLLOWUP_MODEL", os.getenv("OPENAI_MODEL", "gpt-5.6-terra")), messages=[{"role":"system","content":"Ты осторожный outreach-ассистент. Только JSON."},{"role":"user","content":json.dumps(prompt, ensure_ascii=False)}])
+    raw = (response.choices[0].message.content or "").strip().removeprefix("```json").removesuffix("```").strip()
+    result = json.loads(raw)
+    if not result.get("should_send") or not str(result.get("text") or "").strip():
+        raise RuntimeError("Adaptive follow-up decided not to send.")
+    return str(result["text"]).strip()

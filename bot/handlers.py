@@ -451,7 +451,27 @@ async def contact_status_suggestion_callback(update: Update, context: ContextTyp
         await query.edit_message_text("Не удалось обновить статус в Notion.")
         return
     _telegram_user_service(context).resolve_status_suggestion(token)
+    await asyncio.to_thread(ResearchJobStore().record_outreach_event, suggestion["contact_id"], "status_updated", {"status": suggestion["suggested_status"]})
     await query.edit_message_text(f"Готово — статус обновлён на «{suggestion['suggested_status']}».")
+
+
+async def outreach_stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    stats = await asyncio.to_thread(ResearchJobStore().outreach_stats)
+    events = stats["events"]
+    sent = events.get("followup_sent", 0)
+    replies = events.get("inbound_reply", 0)
+    rate = f"{replies / sent * 100:.0f}%" if sent else "—"
+    await update.effective_message.reply_text(
+        "<b>Outreach-аналитика</b>\n\n"
+        f"Лидов с событиями: {stats['leads']}\n"
+        f"Отправлено follow-up: {sent}\n"
+        f"Входящих ответов: {replies}\n"
+        f"Reply rate по follow-up: {rate}\n"
+        f"Отменено: {events.get('followup_cancelled', 0)} · пропущено: {events.get('followup_declined', 0)}\n"
+        f"Обновлений статуса: {events.get('status_updated', 0)}\n\n"
+        "Детальные разрезы по роли, триггеру, CTA и качественным созвонам будут строиться по мере накопления размеченных исходов.",
+        parse_mode="HTML",
+    )
 
 
 async def research_document_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -896,10 +916,12 @@ async def scheduled_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
     elif action == "cancel":
         service.cancel_scheduled_message(token, user_id)
         await _sync_scheduled_followup(item, status="Отменено", stop_reason="Отменено пользователем")
+        await _record_outreach_event(item, "followup_cancelled")
         await query.edit_message_text("Запланированное сообщение отменено.")
     elif action == "decline":
         service.decline_scheduled_message(token, user_id)
         await _sync_scheduled_followup(item, status="Пропущено", stop_reason="Пользователь не подтвердил отправку")
+        await _record_outreach_event(item, "followup_declined")
         await query.edit_message_text("Понял, это сообщение отправлено не будет.")
     elif action == "send":
         if not service.begin_scheduled_message_send(token, user_id):
@@ -910,6 +932,7 @@ async def scheduled_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             message_id = await service.send_message(user_id, str(item["recipient"]), str(item["text"]))
             service.mark_scheduled_message_sent(token, user_id, message_id)
             await _sync_scheduled_followup(item, status="Отправлено", sent_at=datetime.now(timezone.utc))
+            await _record_outreach_event(item, "followup_sent", {"recipient": item.get("recipient", "")})
         except Exception as exc:
             logger.exception("Unable to send scheduled message %s", token)
             service.restore_scheduled_message_confirmation(token, user_id, str(exc))
@@ -972,6 +995,16 @@ async def _sync_scheduled_followup(item: dict, *, status: str | None = None, sen
         )
     except Exception:
         logger.exception("Unable to synchronize Follow-up %s", followup_id)
+
+
+async def _record_outreach_event(item: dict, event_type: str, metadata: dict | None = None) -> None:
+    contact_id = str(item.get("contact_id") or "")
+    if not contact_id:
+        return
+    try:
+        await asyncio.to_thread(ResearchJobStore().record_outreach_event, contact_id, event_type, metadata or {})
+    except Exception:
+        logger.exception("Unable to record outreach event %s", event_type)
 
 
 def _followup_proposal_text(contact_name: str, payload: dict) -> str:

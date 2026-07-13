@@ -54,6 +54,11 @@ class ResearchJobStore:
                     status TEXT NOT NULL DEFAULT 'research_ready', plan_json TEXT NOT NULL DEFAULT '{}',
                     created_at TEXT NOT NULL, updated_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS outreach_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, contact_id TEXT NOT NULL, event_type TEXT NOT NULL,
+                    metadata_json TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_outreach_events_contact ON outreach_events(contact_id, created_at);
                 CREATE TABLE IF NOT EXISTS research_sources (
                     id INTEGER PRIMARY KEY AUTOINCREMENT, job_id TEXT NOT NULL, url TEXT NOT NULL,
                     title TEXT NOT NULL DEFAULT '', excerpt TEXT NOT NULL DEFAULT '', source_type TEXT NOT NULL DEFAULT '',
@@ -135,6 +140,16 @@ class ResearchJobStore:
         item = dict(row)
         item["plan"] = json.loads(item.pop("plan_json") or "{}")
         return item
+
+    def record_outreach_event(self, contact_id: str, event_type: str, metadata: dict | None = None) -> None:
+        with self._tx() as db:
+            db.execute("INSERT INTO outreach_events(contact_id,event_type,metadata_json,created_at) VALUES (?,?,?,?)", (contact_id, event_type, json.dumps(metadata or {}, ensure_ascii=False), _now()))
+
+    def outreach_stats(self) -> dict:
+        with self._lock:
+            rows = self._db.execute("SELECT event_type, COUNT(*) AS total FROM outreach_events GROUP BY event_type").fetchall()
+            leads = self._db.execute("SELECT COUNT(DISTINCT contact_id) AS total FROM outreach_events").fetchone()
+        return {"leads": int(leads["total"] or 0), "events": {str(row["event_type"]): int(row["total"]) for row in rows}}
 
     def get(self, job_id: str, telegram_user_id: int | None = None) -> dict | None:
         sql = "SELECT * FROM research_jobs WHERE id = ?"
