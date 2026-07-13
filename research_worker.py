@@ -21,6 +21,7 @@ from research_jobs import ResearchJobStore
 from notion_store import get_contact, update_contact_research_state, update_contact_research_url
 from sales_agent import deep_company_research, start_usage_tracking, stop_usage_tracking, usage_snapshot
 from outreach import ask_user_for_research_context, build_outreach_plan, quick_qualify
+from openai_costs import today_cost
 
 logging.basicConfig(format="%(asctime)s [%(levelname)s] %(name)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger("research-worker")
@@ -165,6 +166,12 @@ def _usage_line(usage: dict, seconds: float) -> str:
     )
 
 
+def _actual_cost_line(actual_cost: dict | None) -> str:
+    if not actual_cost:
+        return "Cost API: пока нет данных."
+    return f"Cost API: ${float(actual_cost['amount']):.4f} за сегодня по всей организации (UTC)."
+
+
 def run_job(store: ResearchJobStore, job: dict) -> None:
     job_id = str(job["id"])
     started = time.monotonic()
@@ -240,6 +247,9 @@ def run_job(store: ResearchJobStore, job: dict) -> None:
         url = create_company_research_tab(_title(str(job["request"])), report)
         usage = usage_snapshot()
         elapsed = time.monotonic() - started
+        actual_cost = today_cost()
+        if actual_cost:
+            usage["organization_actual_cost"] = actual_cost
         store.update(job_id, status="completed", stage="Готово", progress=100, detail="Отчёт готов.", source_count=len(sources), google_url=url, usage=usage, duration_seconds=elapsed)
         if job.get("contact_id"):
             update_contact_research_url(str(job["contact_id"]), url)
@@ -250,7 +260,7 @@ def run_job(store: ResearchJobStore, job: dict) -> None:
         mode = (plan.get("communication_state") or {}).get("mode", "research_only")
         verdict = "можно проверить и отправить" if mode == "first_message" and draft and not critic.get("rewrite_required") else "первое сообщение не предлагается"
         next_text = {"next_followup": "Первое касание уже есть: research будет использован для следующего follow-up.", "reply_analysis": "Контакт уже ответил: автоматические касания не предлагаются, нужен разбор ответа.", "no_cold_outreach": "Контакт уже не в стадии холодного outreach."}.get(mode, "")
-        _telegram("sendMessage", {"chat_id": job["chat_id"], "text": f"Исследование <code>{job_id}</code> готово.\nОтчёт: {html.escape(url)}\n{_usage_line(usage, elapsed)}\n\n<b>Outreach verdict:</b> {verdict}\n{html.escape(next_text)}\n{('Черновик:\n' + html.escape(draft)) if draft else ''}\n\n/research_report {job_id}", "parse_mode": "HTML"})
+        _telegram("sendMessage", {"chat_id": job["chat_id"], "text": f"Исследование <code>{job_id}</code> готово.\nОтчёт: {html.escape(url)}\n{_usage_line(usage, elapsed)}\n{_actual_cost_line(actual_cost)}\n\n<b>Outreach verdict:</b> {verdict}\n{html.escape(next_text)}\n{('Черновик:\n' + html.escape(draft)) if draft else ''}\n\n/research_report {job_id}", "parse_mode": "HTML"})
     except InterruptedError:
         # Cancellation was persisted by the command; only release any active lease.
         store.update(job_id, release_lease=True)
