@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import json
 import os
-import time
 import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
@@ -25,7 +24,6 @@ def today_cost() -> dict | None:
     start = now.replace(hour=0, minute=0, second=0, microsecond=0)
     params = urllib.parse.urlencode({
         "start_time": int(start.timestamp()),
-        "end_time": int(time.time()),
         "bucket_width": "1d",
         "limit": 1,
     })
