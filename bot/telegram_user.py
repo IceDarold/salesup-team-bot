@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import secrets
 import sqlite3
@@ -19,6 +20,8 @@ from cryptography.fernet import Fernet, InvalidToken
 from telethon import TelegramClient
 from telethon.errors import PasswordHashInvalidError, SessionPasswordNeededError
 from telethon.sessions import StringSession
+
+logger = logging.getLogger(__name__)
 
 
 class TelegramUserError(RuntimeError):

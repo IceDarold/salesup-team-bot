@@ -11,9 +11,9 @@ from google_docs import AICH_RESEARCH_CONTEXT
 
 logger = logging.getLogger(__name__)
 
-INSIGHTS_BASE_URL = os.getenv("INSIGHTS_BASE_URL", "https://apinet.cloud/v1")
-INSIGHTS_MODEL = os.getenv("INSIGHTS_MODEL", "claude-opus-4-8-max")
-INSIGHTS_API_KEY = os.getenv("INSIGHTS_API_KEY")
+INSIGHTS_BASE_URL = "https://api.openai.com/v1"
+INSIGHTS_MODEL = os.getenv("OPENAI_MODEL", "gpt-5.6-terra")
+INSIGHTS_API_KEY = os.getenv("OPENAI_API_KEY")
 INSIGHTS_TIMEOUT = int(os.getenv("INSIGHTS_TIMEOUT", "180"))
 INSIGHTS_MAX_TOKENS = int(os.getenv("INSIGHTS_MAX_TOKENS", "8000"))
 REPORT_MODEL = os.getenv("REPORT_MODEL", os.getenv("INSIGHTS_REPORT_MODEL", INSIGHTS_MODEL))
@@ -76,7 +76,7 @@ def analyze_interview(answers: dict, transcript: str) -> dict:
 def analyze_contact_status(*, contact: dict, statuses: list[str], messages: list[dict]) -> dict:
     """Return a conservative, evidence-backed status recommendation for one conversation."""
     if not INSIGHTS_API_KEY:
-        raise RuntimeError("INSIGHTS_API_KEY is not set.")
+        raise RuntimeError("OPENAI_API_KEY is not set.")
     transcript = "\n".join(
         f"[{item.get('sent_at', '')}] {'Менеджер' if item.get('outgoing') else 'Контакт'}: {item.get('text') or item.get('media') or '[без текста]'}"
         for item in messages
@@ -272,7 +272,7 @@ def dedupe_notion_items(table_name: str, new_items: list[dict], existing_items: 
 
 def _client():
     if not INSIGHTS_API_KEY:
-        raise RuntimeError("INSIGHTS_API_KEY environment variable is not set.")
+        raise RuntimeError("OPENAI_API_KEY environment variable is not set.")
 
     from openai import OpenAI
 

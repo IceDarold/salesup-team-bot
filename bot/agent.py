@@ -19,15 +19,15 @@ class AgentRunResult:
 class SalesUpAgent:
     def __init__(self, *, max_steps: int = 6) -> None:
         self.max_steps = max_steps
-        self.api_key = os.getenv("AGENT_API_KEY") or os.getenv("INSIGHTS_API_KEY", "")
-        self.base_url = os.getenv("AGENT_BASE_URL") or os.getenv("INSIGHTS_BASE_URL", "https://apinet.cloud/v1")
-        self.model = os.getenv("AGENT_MODEL") or os.getenv("INSIGHTS_MODEL", "claude-opus-4-8-max")
+        self.api_key = os.getenv("OPENAI_API_KEY", "")
+        self.base_url = "https://api.openai.com/v1"
+        self.model = os.getenv("OPENAI_MODEL", "gpt-5.6-terra")
         self.timeout = int(os.getenv("AGENT_TIMEOUT", "60"))
         self.catalog = ToolCatalog()
 
     async def run(self, *, text: str, member: dict, is_group: bool, telegram_service=None) -> AgentRunResult:
         if not self.api_key:
-            return AgentRunResult("Агент пока не настроен: не задан AGENT_API_KEY или INSIGHTS_API_KEY.")
+            return AgentRunResult("Агент пока не настроен: не задан OPENAI_API_KEY.")
 
         from openai import OpenAI
 

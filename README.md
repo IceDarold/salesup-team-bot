@@ -39,8 +39,7 @@ questions using personal data in a private chat and team data in a group: contac
 statistics and contact search by name, status, segment, or source. The agent has
 read-only access; creating or changing a contact remains an explicit bot flow.
 
-It uses `AGENT_API_KEY`, `AGENT_BASE_URL`, and `AGENT_MODEL` when set, otherwise
-falls back to the existing `INSIGHTS_*` settings.
+It uses the official OpenAI API with `OPENAI_API_KEY` and `OPENAI_MODEL`.
 
 ## Personal Telegram accounts
 
