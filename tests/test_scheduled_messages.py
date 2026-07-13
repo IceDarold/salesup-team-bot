@@ -4,6 +4,7 @@ import unittest
 from datetime import datetime, timedelta, timezone
 
 from bot.telegram_user import TelegramUserService
+from bot.handlers import _calendar_keyboard, _hour_keyboard, _minute_keyboard, _relative_time, _scheduled_timezone
 
 
 class ScheduledMessagesTests(unittest.TestCase):
@@ -36,6 +37,17 @@ class ScheduledMessagesTests(unittest.TestCase):
         updated = self.service.update_scheduled_message(item["token"], 1, text="Новый текст")
         self.assertEqual(updated["text"], "Новый текст")
         self.assertEqual(updated["status"], "scheduled")
+
+    def test_picker_has_calendar_hour_pages_and_minute_steps(self):
+        tomorrow = datetime.now(_scheduled_timezone()).date() + timedelta(days=1)
+        calendar = _calendar_keyboard(tomorrow)
+        self.assertGreaterEqual(len(calendar.inline_keyboard), 6)
+        self.assertTrue(any("date:pick" in button.callback_data for row in calendar.inline_keyboard for button in row))
+        hours = _hour_keyboard(tomorrow, 2)
+        self.assertTrue(any(button.callback_data.endswith("hour:pick:12") for row in hours.inline_keyboard for button in row))
+        minutes = _minute_keyboard(tomorrow, 12)
+        self.assertEqual(sum(len(row) for row in minutes.inline_keyboard), 12)
+        self.assertTrue(_relative_time(datetime.now(_scheduled_timezone()) + timedelta(minutes=75)).startswith("через"))
 
 
 if __name__ == "__main__":

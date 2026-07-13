@@ -18,7 +18,7 @@ import time
 import urllib.parse
 import urllib.request
 from contextlib import suppress
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -94,7 +94,7 @@ SCHEDULED_TIMEZONE = os.getenv("SCHEDULED_MESSAGES_TIMEZONE", "Europe/Moscow")
     CONTACT_CUSTOM_SOURCE,
 ) = range(100, 106)
 
-SCHEDULE_RECIPIENT, SCHEDULE_TEXT, SCHEDULE_TIME, SCHEDULE_EDIT_VALUE = range(300, 304)
+SCHEDULE_RECIPIENT, SCHEDULE_TEXT, SCHEDULE_DATE, SCHEDULE_HOUR, SCHEDULE_MINUTE, SCHEDULE_EDIT_VALUE = range(300, 306)
 
 SEGMENT_KB = InlineKeyboardMarkup(
     [
@@ -577,14 +577,72 @@ def _scheduled_timezone() -> ZoneInfo:
         return ZoneInfo("Europe/Moscow")
 
 
-def _parse_scheduled_time(value: str) -> datetime:
-    try:
-        when = datetime.strptime(value.strip(), "%d.%m.%Y %H:%M").replace(tzinfo=_scheduled_timezone())
-    except ValueError as exc:
-        raise ValueError(f"Укажи дату в формате ДД.ММ.ГГГГ ЧЧ:ММ ({SCHEDULED_TIMEZONE}).") from exc
-    if when <= datetime.now(_scheduled_timezone()):
-        raise ValueError("Время должно быть в будущем.")
-    return when
+def _relative_time(when: datetime) -> str:
+    seconds = int((when - datetime.now(_scheduled_timezone())).total_seconds())
+    if seconds <= 0:
+        return "время уже пришло"
+    minutes = max(1, (seconds + 59) // 60)
+    days, minutes = divmod(minutes, 24 * 60)
+    hours, minutes = divmod(minutes, 60)
+    parts = ([f"{days} дн."] if days else []) + ([f"{hours} ч"] if hours else []) + ([f"{minutes} мин"] if minutes else [])
+    return "через " + " ".join(parts[:2])
+
+
+def _calendar_keyboard(month: date) -> InlineKeyboardMarkup:
+    import calendar
+    today = datetime.now(_scheduled_timezone()).date()
+    month = month.replace(day=1)
+    rows = [[
+        InlineKeyboardButton("‹", callback_data=f"{SCHEDULED_PREFIX}date:nav:{(month - timedelta(days=1)).strftime('%Y%m')}") if month > today.replace(day=1) else InlineKeyboardButton("·", callback_data=f"{SCHEDULED_PREFIX}date:noop"),
+        InlineKeyboardButton(_month_label(month), callback_data=f"{SCHEDULED_PREFIX}date:noop"),
+        InlineKeyboardButton("›", callback_data=f"{SCHEDULED_PREFIX}date:nav:{(month + timedelta(days=32)).replace(day=1).strftime('%Y%m')}") if month < (today.replace(day=1) + timedelta(days=366)).replace(day=1) else InlineKeyboardButton("·", callback_data=f"{SCHEDULED_PREFIX}date:noop"),
+    ], [InlineKeyboardButton(label, callback_data=f"{SCHEDULED_PREFIX}date:noop") for label in ("Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс")]]
+    for week in calendar.Calendar(firstweekday=0).monthdatescalendar(month.year, month.month):
+        row = []
+        for current in week:
+            enabled = current.month == month.month and current >= today and current <= today + timedelta(days=366)
+            label = str(current.day) if current.month == month.month else "·"
+            data = f"{SCHEDULED_PREFIX}date:pick:{current.strftime('%Y%m%d')}" if enabled else f"{SCHEDULED_PREFIX}date:noop"
+            row.append(InlineKeyboardButton(label, callback_data=data))
+        rows.append(row)
+    return InlineKeyboardMarkup(rows)
+
+
+def _month_label(month: date) -> str:
+    months = ("январь", "февраль", "март", "апрель", "май", "июнь", "июль", "август", "сентябрь", "октябрь", "ноябрь", "декабрь")
+    return f"{months[month.month - 1].capitalize()} {month.year}"
+
+
+def _hour_keyboard(selected_date: date, page: int = 0) -> InlineKeyboardMarkup:
+    page = max(0, min(3, page))
+    now = datetime.now(_scheduled_timezone())
+    start = page * 6
+    rows = []
+    for offset in range(0, 6, 3):
+        row = []
+        for hour in range(start + offset, start + offset + 3):
+            allowed = selected_date > now.date() or hour >= now.hour
+            row.append(InlineKeyboardButton(f"{hour:02d}", callback_data=f"{SCHEDULED_PREFIX}hour:pick:{hour:02d}" if allowed else f"{SCHEDULED_PREFIX}hour:noop"))
+        rows.append(row)
+    rows.append([
+        InlineKeyboardButton("‹", callback_data=f"{SCHEDULED_PREFIX}hour:page:{page - 1}") if page else InlineKeyboardButton("·", callback_data=f"{SCHEDULED_PREFIX}hour:noop"),
+        InlineKeyboardButton(f"{start:02d}:00–{start + 5:02d}:59", callback_data=f"{SCHEDULED_PREFIX}hour:noop"),
+        InlineKeyboardButton("›", callback_data=f"{SCHEDULED_PREFIX}hour:page:{page + 1}") if page < 3 else InlineKeyboardButton("·", callback_data=f"{SCHEDULED_PREFIX}hour:noop"),
+    ])
+    return InlineKeyboardMarkup(rows)
+
+
+def _minute_keyboard(selected_date: date, hour: int) -> InlineKeyboardMarkup:
+    now = datetime.now(_scheduled_timezone())
+    rows = []
+    for start in range(0, 60, 15):
+        row = []
+        for minute in range(start, start + 15, 5):
+            when = datetime.combine(selected_date, datetime.min.time(), tzinfo=_scheduled_timezone()).replace(hour=hour, minute=minute)
+            allowed = when > now
+            row.append(InlineKeyboardButton(f"{minute:02d}", callback_data=f"{SCHEDULED_PREFIX}minute:pick:{minute:02d}" if allowed else f"{SCHEDULED_PREFIX}minute:noop"))
+        rows.append(row)
+    return InlineKeyboardMarkup(rows)
 
 
 def _scheduled_card(item: dict, *, confirmation: bool = False) -> str:
@@ -597,7 +655,8 @@ def _scheduled_card(item: dict, *, confirmation: bool = False) -> str:
     return (
         f"{title}\n\nСтатус: <b>{html.escape(status)}</b>\n"
         f"Контакт: <code>{html.escape(str(item.get('recipient') or '—'))}</code>\n"
-        f"Время: <b>{when.strftime('%d.%m.%Y %H:%M')}</b> ({html.escape(SCHEDULED_TIMEZONE)})\n\n"
+        f"Время: <b>{when.strftime('%d.%m.%Y %H:%M')}</b> ({html.escape(SCHEDULED_TIMEZONE)})\n"
+        f"Отправка: <b>{html.escape(_relative_time(when))}</b>\n\n"
         f"Сообщение:\n{html.escape(str(item.get('text') or '—')[:3000])}"
     )
 
@@ -648,24 +707,72 @@ async def scheduled_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await update.effective_message.reply_text("Текст сообщения не должен быть пустым.")
         return SCHEDULE_TEXT
     context.user_data.setdefault("scheduled_draft", {})["text"] = text
-    await update.effective_message.reply_text(f"Когда напомнить об отправке? Формат: <code>ДД.ММ.ГГГГ ЧЧ:ММ</code> ({SCHEDULED_TIMEZONE}).", parse_mode="HTML")
-    return SCHEDULE_TIME
+    context.user_data["scheduled_time_target"] = "create"
+    today = datetime.now(_scheduled_timezone()).date()
+    await update.effective_message.reply_text("Выбери дату отправки.", reply_markup=_calendar_keyboard(today))
+    return SCHEDULE_DATE
 
 
-async def scheduled_time(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    try:
-        when = _parse_scheduled_time(update.effective_message.text or "")
-    except ValueError as exc:
-        await update.effective_message.reply_text(str(exc))
-        return SCHEDULE_TIME
-    draft = context.user_data.pop("scheduled_draft", {})
-    if not draft.get("recipient") or not draft.get("text"):
-        await update.effective_message.reply_text("Черновик потерялся. Начни заново: /schedule_message")
+async def scheduled_date_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    parts = (query.data or "").split(":", 3)
+    action, value = (parts[2] if len(parts) > 2 else "noop"), (parts[3] if len(parts) > 3 else "")
+    if action == "noop":
+        return SCHEDULE_DATE
+    if action == "nav":
+        month = datetime.strptime(value, "%Y%m").date()
+        await query.edit_message_reply_markup(reply_markup=_calendar_keyboard(month))
+        return SCHEDULE_DATE
+    selected = datetime.strptime(value, "%Y%m%d").date()
+    context.user_data["scheduled_selected_date"] = selected.isoformat()
+    await query.edit_message_text(f"Дата: <b>{selected.strftime('%d.%m.%Y')}</b>\n\nТеперь выбери час.", parse_mode="HTML", reply_markup=_hour_keyboard(selected))
+    return SCHEDULE_HOUR
+
+
+async def scheduled_hour_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    parts = (query.data or "").split(":", 3)
+    action, value = (parts[2] if len(parts) > 2 else "noop"), (parts[3] if len(parts) > 3 else "")
+    selected = date.fromisoformat(context.user_data.get("scheduled_selected_date") or "")
+    if action == "noop":
+        return SCHEDULE_HOUR
+    if action == "page":
+        await query.edit_message_reply_markup(reply_markup=_hour_keyboard(selected, int(value)))
+        return SCHEDULE_HOUR
+    hour = int(value)
+    context.user_data["scheduled_selected_hour"] = hour
+    await query.edit_message_text(f"Дата: <b>{selected.strftime('%d.%m.%Y')}</b>, время: <b>{hour:02d}:__</b>\n\nВыбери минуты.", parse_mode="HTML", reply_markup=_minute_keyboard(selected, hour))
+    return SCHEDULE_MINUTE
+
+
+async def scheduled_minute_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    parts = (query.data or "").split(":", 3)
+    action, value = (parts[2] if len(parts) > 2 else "noop"), (parts[3] if len(parts) > 3 else "")
+    if action == "noop":
+        return SCHEDULE_MINUTE
+    selected = date.fromisoformat(context.user_data.get("scheduled_selected_date") or "")
+    hour = int(context.user_data.get("scheduled_selected_hour"))
+    when = datetime.combine(selected, datetime.min.time(), tzinfo=_scheduled_timezone()).replace(hour=hour, minute=int(value))
+    if when <= datetime.now(_scheduled_timezone()):
+        await query.answer("Выбери время в будущем.", show_alert=True)
+        return SCHEDULE_MINUTE
+    target = context.user_data.pop("scheduled_time_target", "create")
+    context.user_data.pop("scheduled_selected_date", None)
+    context.user_data.pop("scheduled_selected_hour", None)
+    if target == "edit":
+        edit = context.user_data.pop("scheduled_edit", {})
+        item = _telegram_user_service(context).update_scheduled_message(edit.get("token", ""), update.effective_user.id, scheduled_at=when)
+    else:
+        draft = context.user_data.pop("scheduled_draft", {})
+        item = _telegram_user_service(context).create_scheduled_message(update.effective_user.id, draft.get("recipient", ""), draft.get("text", ""), when) if draft.get("recipient") and draft.get("text") else None
+    if not item:
+        await query.edit_message_text("Не удалось сохранить время. Начни заново: /schedule_message")
         return ConversationHandler.END
-    item = _telegram_user_service(context).create_scheduled_message(update.effective_user.id, draft["recipient"], draft["text"], when)
-    await update.effective_message.reply_text(
-        _scheduled_card(item), parse_mode="HTML", reply_markup=_scheduled_buttons(item["token"]),
-    )
+    await query.edit_message_text(_scheduled_card(item), parse_mode="HTML", reply_markup=_scheduled_buttons(item["token"]))
     return ConversationHandler.END
 
 
@@ -680,7 +787,7 @@ async def scheduled_messages_command(update: Update, context: ContextTypes.DEFAU
     buttons = []
     for item in items:
         when = datetime.fromisoformat(str(item["scheduled_at"])).astimezone(_scheduled_timezone())
-        label = f"{when.strftime('%d.%m %H:%M')} · {item['recipient']}"
+        label = f"{when.strftime('%d.%m %H:%M')} ({_relative_time(when)}) · {item['recipient']}"
         buttons.append([InlineKeyboardButton(label[:60], callback_data=f"{SCHEDULED_PREFIX}open:{item['token']}")])
     await update.effective_message.reply_text("<b>Запланированные сообщения</b>\nВыбери сообщение для просмотра или изменения.", parse_mode="HTML", reply_markup=InlineKeyboardMarkup(buttons))
 
@@ -697,7 +804,7 @@ async def scheduled_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
     user_id = update.effective_user.id
     if action == "back":
         items = service.list_scheduled_messages(user_id)
-        buttons = [[InlineKeyboardButton(f"{datetime.fromisoformat(str(item['scheduled_at'])).astimezone(_scheduled_timezone()).strftime('%d.%m %H:%M')} · {item['recipient']}"[:60], callback_data=f"{SCHEDULED_PREFIX}open:{item['token']}")] for item in items]
+        buttons = [[InlineKeyboardButton(f"{datetime.fromisoformat(str(item['scheduled_at'])).astimezone(_scheduled_timezone()).strftime('%d.%m %H:%M')} ({_relative_time(datetime.fromisoformat(str(item['scheduled_at'])).astimezone(_scheduled_timezone()))}) · {item['recipient']}"[:60], callback_data=f"{SCHEDULED_PREFIX}open:{item['token']}")] for item in items]
         await query.edit_message_text("<b>Запланированные сообщения</b>\nВыбери сообщение.", parse_mode="HTML", reply_markup=InlineKeyboardMarkup(buttons) if buttons else None)
         return
     item = service.get_scheduled_message(token, user_id)
@@ -736,7 +843,12 @@ async def scheduled_edit_entry(update: Update, context: ContextTypes.DEFAULT_TYP
         await query.edit_message_text("Сообщение не найдено или больше недоступно.")
         return ConversationHandler.END
     context.user_data["scheduled_edit"] = {"token": token, "field": field}
-    prompts = {"time": f"Новое время: <code>ДД.ММ.ГГГГ ЧЧ:ММ</code> ({SCHEDULED_TIMEZONE}).", "recipient": "Новый @username, t.me URL, телефон или Telegram ID:", "text": "Новый текст сообщения:"}
+    if field == "time":
+        current = datetime.fromisoformat(str(item["scheduled_at"])).astimezone(_scheduled_timezone()).date()
+        context.user_data["scheduled_time_target"] = "edit"
+        await query.edit_message_text("Выбери новую дату отправки.", reply_markup=_calendar_keyboard(max(current, datetime.now(_scheduled_timezone()).date())))
+        return SCHEDULE_DATE
+    prompts = {"recipient": "Новый @username, t.me URL, телефон или Telegram ID:", "text": "Новый текст сообщения:"}
     await query.message.reply_text(prompts[field], parse_mode="HTML")
     return SCHEDULE_EDIT_VALUE
 
@@ -748,17 +860,10 @@ async def scheduled_edit_value(update: Update, context: ContextTypes.DEFAULT_TYP
         await update.effective_message.reply_text("Не получилось сохранить изменение. Открой сообщение через /scheduled_messages.")
         return ConversationHandler.END
     field = edit.get("field")
-    try:
-        if field == "time":
-            item = _telegram_user_service(context).update_scheduled_message(edit["token"], update.effective_user.id, scheduled_at=_parse_scheduled_time(value))
-        elif field in {"recipient", "text"}:
-            item = _telegram_user_service(context).update_scheduled_message(edit["token"], update.effective_user.id, **{field: value})
-        else:
-            item = None
-    except ValueError as exc:
-        context.user_data["scheduled_edit"] = edit
-        await update.effective_message.reply_text(str(exc))
-        return SCHEDULE_EDIT_VALUE
+    if field in {"recipient", "text"}:
+        item = _telegram_user_service(context).update_scheduled_message(edit["token"], update.effective_user.id, **{field: value})
+    else:
+        item = None
     if not item:
         await update.effective_message.reply_text("Не удалось изменить сообщение: оно уже недоступно.")
         return ConversationHandler.END
