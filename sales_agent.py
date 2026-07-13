@@ -91,7 +91,7 @@ def deep_company_research(
     cancelled: Callable[[], bool],
     trace: Callable[[str, str, str], None],
     refinement: str = "",
-) -> tuple[str, list[dict], list[dict]]:
+) -> tuple[dict, list[dict], list[dict]]:
     """Run a bounded plan/search/evidence/synthesis/critique research loop.
 
     The caller persists the returned ledger. This function intentionally has no
@@ -160,42 +160,125 @@ def deep_company_research(
         if not queries:
             break
     sources = list(all_sources.values())[:max_sources]
+    source_catalog = _source_catalog(sources)
     source_urls = {str(item.get("url") or "") for item in sources}
     claims = [claim for claim in all_claims if str(claim.get("url") or "") in source_urls or str(claim.get("confidence") or "") == "hypothesis"]
     if cancelled():
         raise InterruptedError("Research cancelled")
     progress("analyzing", 75, f"Собрано {len(sources)} источников; строю стратегию на доказательной базе.")
     trace("model", "Синтез стратегии — вызов", f"Передаю модели {len(sources)} источников и {len(claims)} утверждений.")
-    dossier = json.dumps({"sources": sources, "claims": claims, "gaps": gaps}, ensure_ascii=False)[:110000]
-    draft_response = _client().responses.create(
-        model=model,
-        input=("Ты senior B2B researcher и sales strategist. На основе ТОЛЬКО приведённого реестра\n"
-               "доказательств подготовь полный отчёт на русском в Markdown. Разделы: Executive summary,\n"
-               "методика и scope, компания и история, разбор вакансии, рынок/конкуренты, подтверждённые боли\n"
-               "и автоматизация, ICP/карта стейкхолдеров, 30-дневная стратегия, три первых сообщения, риски\n"
-               "и вопросы, источники. Рядом с каждым фактом указывай URL. Если доказательства нет — помечай\n"
-               "как «Гипотеза». Не выдумывай личные контакты. Боли должны содержать наблюдение, доказательство,\n"
-               "уверенность и идею автоматизации.\n\n" + scope + "\n\nРеестр:\n" + dossier),
+    source_by_url = {item["url"]: item["id"] for item in source_catalog}
+    report_claims = [{**claim, "source_id": source_by_url.get(str(claim.get("url") or ""), "")} for claim in claims]
+    dossier = json.dumps({"sources": source_catalog, "claims": report_claims, "gaps": gaps}, ensure_ascii=False)[:110000]
+    draft = _json_response(
+        _report_prompt(scope, dossier), model=model,
     )
-    draft = str(draft_response.output_text or "").strip()
-    if not draft:
-        raise RuntimeError("Research model returned an empty report.")
-    trace("model", "Синтез стратегии — результат", _preview(draft))
+    trace("model", "Синтез стратегии — результат", _preview_json(draft))
     if cancelled():
         raise InterruptedError("Research cancelled")
     progress("reviewing", 90, "Проверяю отчёт: убираю неподтверждённые утверждения.")
     trace("model", "Критическая проверка — вызов", f"Проверяю отчёт по {len(source_urls)} разрешённым URL.")
-    review = _client().responses.create(
-        model=model,
-        input=("Ты независимый критик. Верни исправленную версию отчёта в Markdown.\n"
-               "Удали или явно пометь «Гипотеза» любое утверждение без URL из разрешённого списка.\n"
-               "Не сокращай стратегические разделы. В конце добавь «## Проверка качества» с числом источников,\n"
-               "числом подтверждённых claims и списком ключевых пробелов.\n\nРазрешённые URL:\n" +
-               "\n".join(sorted(source_urls)) + "\n\nЧерновик:\n" + draft),
+    report = _json_response(
+        _review_prompt(source_catalog, draft), model=model,
     )
-    report = str(review.output_text or draft).strip()
-    trace("model", "Критическая проверка — результат", _preview(report))
+    report = _normalize_report(report, source_catalog)
+    trace("model", "Критическая проверка — результат", _preview_json(report))
     return report, sources, claims
+
+
+def _source_catalog(sources: list[dict]) -> list[dict]:
+    """Give sources stable, short citation identifiers for the model and renderer."""
+    catalog = []
+    for index, source in enumerate(sources, start=1):
+        url = str(source.get("url") or "").strip()
+        if not url:
+            continue
+        catalog.append({
+            "id": f"S{index}", "title": str(source.get("title") or url), "url": url,
+            "excerpt": str(source.get("excerpt") or ""), "type": str(source.get("source_type") or ""),
+            "published_at": str(source.get("published_at") or ""),
+        })
+    return catalog
+
+
+def _report_prompt(scope: str, dossier: str) -> str:
+    return """Ты senior B2B researcher и sales strategist. Работай ТОЛЬКО с реестром ниже.
+Верни ТОЛЬКО валидный JSON без Markdown и без URL вне `source_ids`.
+
+Схема:
+{"executive_summary":"", "sales_brief":{"signals":[""],"buyer":"","value_proposition":"","cta":""},
+"company_facts":[{"fact":"","evidence":"","source_ids":["S1"],"confidence":"high|medium|hypothesis"}],
+"vacancy_signals":[{"signal":"","why_it_matters":"","source_ids":["S1"],"confidence":"high|medium|hypothesis"}],
+"pains":[{"pain":"","evidence":"","automation":"","priority":"P1|P2|P3","source_ids":["S1"],"confidence":"high|medium|hypothesis"}],
+"stakeholders":[{"role":"","motivation":"","cta":"","priority":1}],
+"touchpoints":[{"day":"1","channel":"","action":""}],
+"messages":[{"label":"Короткое","text":""}],
+"risks":[""],"discovery_questions":[""],"gaps":[""]}.
+
+Правила: максимум 5 company_facts, 5 vacancy_signals, 7 pains, 5 stakeholders, 8 touchpoints,
+3 messages, 8 вопросов. Первые блоки должны быть пригодны для sales-brief на две страницы.
+Не повторяй тезисы. Любое утверждение без source_ids — только confidence=hypothesis.
+
+""" + scope + "\n\nРеестр доказательств:\n" + dossier
+
+
+def _review_prompt(source_catalog: list[dict], draft: dict) -> str:
+    allowed = ", ".join(item["id"] for item in source_catalog)
+    return """Ты независимый фактчекер. Верни ТОЛЬКО исправленный JSON в той же схеме.
+Разрешены только source_ids: """ + allowed + """.
+Для high/medium оставляй только факты с подходящим source_id. Иначе меняй confidence на hypothesis
+и явно пиши в evidence, что это нужно проверить. Удали повторы, неподтверждённые цифры и личные
+контакты. Не добавляй поля и не превращай JSON в Markdown.
+
+Черновик:\n""" + json.dumps(draft, ensure_ascii=False)
+
+
+def _normalize_report(report: dict, source_catalog: list[dict]) -> dict:
+    allowed = {item["id"] for item in source_catalog}
+    report = report if isinstance(report, dict) else {}
+    result = {
+        "executive_summary": str(report.get("executive_summary") or ""),
+        "sales_brief": report.get("sales_brief") if isinstance(report.get("sales_brief"), dict) else {},
+        "company_facts": _normalize_evidence_items(report.get("company_facts"), allowed)[:5],
+        "vacancy_signals": _normalize_evidence_items(report.get("vacancy_signals"), allowed)[:5],
+        "pains": _normalize_evidence_items(report.get("pains"), allowed)[:7],
+        "stakeholders": _dict_list(report.get("stakeholders"))[:5],
+        "touchpoints": _dict_list(report.get("touchpoints"))[:8],
+        "messages": _dict_list(report.get("messages"))[:3],
+        "risks": _text_list(report.get("risks"))[:8],
+        "discovery_questions": _text_list(report.get("discovery_questions"))[:8],
+        "gaps": _text_list(report.get("gaps"))[:8],
+        "sources": source_catalog,
+    }
+    brief = result["sales_brief"]
+    result["sales_brief"] = {
+        "signals": _text_list(brief.get("signals"))[:3], "buyer": str(brief.get("buyer") or ""),
+        "value_proposition": str(brief.get("value_proposition") or ""), "cta": str(brief.get("cta") or ""),
+    }
+    return result
+
+
+def _normalize_evidence_items(value, allowed: set[str]) -> list[dict]:
+    items = _dict_list(value)
+    normalized = []
+    for item in items:
+        ids = [str(source_id) for source_id in item.get("source_ids", []) if str(source_id) in allowed]
+        confidence = str(item.get("confidence") or "hypothesis").lower()
+        if confidence not in {"high", "medium", "hypothesis"}:
+            confidence = "hypothesis"
+        if confidence in {"high", "medium"} and not ids:
+            confidence = "hypothesis"
+            item["evidence"] = "Требует подтверждения источником."
+        normalized.append({**item, "source_ids": ids, "confidence": confidence})
+    return normalized
+
+
+def _dict_list(value) -> list[dict]:
+    return [item for item in (value or []) if isinstance(item, dict)]
+
+
+def _text_list(value) -> list[str]:
+    return [str(item).strip() for item in (value or []) if str(item).strip()]
 
 
 def _preview(value: str, limit: int = 1800) -> str:

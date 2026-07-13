@@ -5,6 +5,7 @@ Run with ``python -m research_worker`` under a separate systemd service.
 from __future__ import annotations
 
 import html
+import json
 import logging
 import os
 import re
@@ -94,7 +95,7 @@ def run_job(store: ResearchJobStore, job: dict) -> None:
         if store.is_cancelled(job_id):
             return
         store.replace_evidence(job_id, sources, claims)
-        store.update(job_id, status="analyzing", stage="Публикация", progress=96, detail="Сохраняю доказательный отчёт в Google Docs.", source_count=len(sources), report=report)
+        store.update(job_id, status="analyzing", stage="Публикация", progress=96, detail="Сохраняю доказательный отчёт в Google Docs.", source_count=len(sources), report=json.dumps(report, ensure_ascii=False))
         _notify_progress(store.get(job_id) or job)
         url = create_company_research_tab(_title(str(job["request"])), report)
         store.update(job_id, status="completed", stage="Готово", progress=100, detail="Отчёт готов.", source_count=len(sources), google_url=url)

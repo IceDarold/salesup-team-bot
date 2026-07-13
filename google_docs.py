@@ -22,7 +22,7 @@ DEFAULT_OAUTH_CLIENT_PATH = Path(__file__).parent / ".secrets" / "google-oauth-c
 DEFAULT_OAUTH_TOKEN_PATH = Path(__file__).parent / ".secrets" / "google-oauth-token.json"
 DOC_ID = os.getenv("GOOGLE_DOC_ID", "1wDR5jAx7Y8rQetmdY1WyHSvtyZYKM0n-qdWEuSLVe_s")
 CONVERSATION_DOC_ID = os.getenv("GOOGLE_CONVERSATION_DOC_ID", "1zs57P-lBgM8oBOajx2SfbbKwjrbrdfJk1GZAKrYdO8Q")
-RESEARCH_DOC_ID = os.getenv("GOOGLE_RESEARCH_DOC_ID", CONVERSATION_DOC_ID)
+RESEARCH_DOC_ID = os.getenv("GOOGLE_RESEARCH_DOC_ID", "1wUY-eeFboYPRjAEg5N6kytRF5Y6VDPS8aw49_A3Qm2M")
 CREDS_PATH = Path(os.getenv("GOOGLE_APPLICATION_CREDENTIALS", str(DEFAULT_CREDS_PATH)))
 OAUTH_CLIENT_PATH = Path(os.getenv("GOOGLE_OAUTH_CLIENT_SECRET", str(DEFAULT_OAUTH_CLIENT_PATH)))
 OAUTH_TOKEN_PATH = Path(os.getenv("GOOGLE_OAUTH_TOKEN", str(DEFAULT_OAUTH_TOKEN_PATH)))
@@ -369,19 +369,181 @@ def delete_conversation_tab_by_id(tab_id: str) -> None:
     _delete_tab(_get_service(), tab_id, CONVERSATION_DOC_ID)
 
 
-def create_company_research_tab(title: str, report: str) -> str:
-    """Save a source-grounded company research report as a dedicated Google Docs tab."""
+def create_company_research_tab(title: str, report: dict | str) -> str:
+    """Save a structured company research report as a formatted Google Docs tab."""
     service = _get_service()
     tab_title = _unique_tab_title(service, _sanitize_title(f"Research — {title}")[:100], RESEARCH_DOC_ID)
     tab_id = _create_tab(service, tab_title, RESEARCH_DOC_ID)
-    content = f"{tab_title}\n\n{report.strip()}\n"
     try:
-        _insert_tab_content(service, tab_id, content, RESEARCH_DOC_ID)
+        if isinstance(report, dict):
+            _insert_research_report(service, tab_id, tab_title, report)
+        else:  # Compatibility with historical Markdown reports.
+            _insert_tab_content(service, tab_id, f"{tab_title}\n\n{report.strip()}\n", RESEARCH_DOC_ID)
         return f"https://docs.google.com/document/d/{RESEARCH_DOC_ID}/edit?tab={tab_id}"
     except Exception:
         with suppress(Exception):
             _delete_tab(service, tab_id, RESEARCH_DOC_ID)
         raise
+
+
+def _insert_research_report(service, tab_id: str, title: str, report: dict) -> None:
+    """Render structured research into native Docs headings, bullets, callouts and links."""
+    content, headings, bullets, hypothesis_ranges = _research_report_content(title, report)
+    requests = [{"insertText": {"endOfSegmentLocation": {"tabId": tab_id}, "text": content}}]
+    for start, end, style in headings:
+        requests.append({
+            "updateParagraphStyle": {
+                "range": {"tabId": tab_id, "startIndex": start, "endIndex": end},
+                "paragraphStyle": {"namedStyleType": style}, "fields": "namedStyleType",
+            }
+        })
+    for start, end in bullets:
+        requests.append({
+            "createParagraphBullets": {
+                "range": {"tabId": tab_id, "startIndex": start, "endIndex": end},
+                "bulletPreset": "BULLET_DISC_CIRCLE_SQUARE",
+            }
+        })
+    for start, end in hypothesis_ranges:
+        requests.append({
+            "updateTextStyle": {
+                "range": {"tabId": tab_id, "startIndex": start, "endIndex": end},
+                "textStyle": {"backgroundColor": {"color": {"rgbColor": {"red": 1, "green": 0.95, "blue": 0.75}}}},
+                "fields": "backgroundColor",
+            }
+        })
+    source_urls = {str(item.get("id")): str(item.get("url")) for item in report.get("sources", []) if item.get("id") and item.get("url")}
+    for match in re.finditer(r"\[(S\d+)\]", content):
+        url = source_urls.get(match.group(1))
+        if url:
+            start = 1 + _utf16_len(content[:match.start()])
+            end = start + _utf16_len(match.group(0))
+            requests.append({
+                "updateTextStyle": {
+                    "range": {"tabId": tab_id, "startIndex": start, "endIndex": end},
+                    "textStyle": {"link": {"url": url}, "foregroundColor": {"color": {"rgbColor": {"red": 0.1, "green": 0.35, "blue": 0.8}}}},
+                    "fields": "link,foregroundColor",
+                }
+            })
+    for start in range(0, len(requests), 80):
+        _execute_google_request(service.documents().batchUpdate(documentId=RESEARCH_DOC_ID, body={"requests": requests[start:start + 80]}))
+
+
+def _research_report_content(title: str, report: dict) -> tuple[str, list[tuple[int, int, str]], list[tuple[int, int]], list[tuple[int, int]]]:
+    lines: list[str] = []
+    headings: list[tuple[int, int, str]] = []
+    bullets: list[tuple[int, int]] = []
+    hypotheses: list[tuple[int, int]] = []
+
+    def position() -> int:
+        return 1 + _utf16_len("\n".join(lines)) + (1 if lines else 0)
+
+    def paragraph(text: str = "") -> tuple[int, int]:
+        start = position()
+        lines.append(str(text).strip())
+        return start, start + _utf16_len(str(text).strip())
+
+    def heading(text: str, level: str) -> None:
+        start, end = paragraph(text)
+        headings.append((start, end + 1, level))
+
+    def bullet_items(items: list[str]) -> None:
+        if not items:
+            return
+        start = position()
+        for item in items:
+            paragraph(item)
+        bullets.append((start, position()))
+
+    def citations(item: dict) -> str:
+        ids = [str(value) for value in item.get("source_ids", []) if str(value)]
+        return " " + " ".join(f"[{source_id}]" for source_id in ids) if ids else ""
+
+    heading(title, "TITLE")
+    paragraph(f"Сформировано: {datetime.now().strftime('%d.%m.%Y %H:%M')}")
+    paragraph("Легенда: жёлтая подсветка — гипотеза, которую нужно проверить на discovery.")
+    paragraph()
+
+    heading("Что делать сейчас", "HEADING_1")
+    brief = report.get("sales_brief") or {}
+    bullet_items([str(item) for item in brief.get("signals", []) if str(item)])
+    if brief.get("buyer"):
+        paragraph(f"Кому писать: {brief['buyer']}")
+    if brief.get("value_proposition"):
+        paragraph(f"Ценность: {brief['value_proposition']}")
+    if brief.get("cta"):
+        paragraph(f"Первый CTA: {brief['cta']}")
+    if report.get("executive_summary"):
+        paragraph(report["executive_summary"])
+    paragraph()
+
+    def evidence_section(title_text: str, items: list[dict], main_key: str, secondary_key: str | None = None) -> None:
+        if not items:
+            return
+        heading(title_text, "HEADING_1")
+        for item in items:
+            text = str(item.get(main_key) or "").strip()
+            if not text:
+                continue
+            confidence = str(item.get("confidence") or "hypothesis")
+            prefix = "Гипотеза: " if confidence == "hypothesis" else "Факт: "
+            start, end = paragraph(prefix + text + citations(item))
+            if confidence == "hypothesis":
+                hypotheses.append((start, end))
+            evidence = str(item.get("evidence") or "").strip()
+            if evidence:
+                paragraph("Доказательство: " + evidence)
+            if secondary_key and item.get(secondary_key):
+                paragraph("Рекомендация: " + str(item[secondary_key]))
+            if item.get("priority"):
+                paragraph("Приоритет: " + str(item["priority"]))
+            paragraph()
+
+    evidence_section("Компания и подтверждённые факты", report.get("company_facts") or [], "fact")
+    evidence_section("Сигналы вакансии", report.get("vacancy_signals") or [], "signal", "why_it_matters")
+    evidence_section("Боли и автоматизация", report.get("pains") or [], "pain", "automation")
+
+    stakeholders = report.get("stakeholders") or []
+    if stakeholders:
+        heading("Кому писать", "HEADING_1")
+        for item in stakeholders:
+            paragraph(f"{item.get('priority') or '—'}. {item.get('role') or 'Роль'} — {item.get('motivation') or ''}")
+            if item.get("cta"):
+                paragraph("CTA: " + str(item["cta"]))
+        paragraph()
+
+    touchpoints = report.get("touchpoints") or []
+    if touchpoints:
+        heading("Последовательность касаний", "HEADING_1")
+        bullet_items([f"День {item.get('day') or '—'} · {item.get('channel') or '—'}: {item.get('action') or ''}" for item in touchpoints])
+        paragraph()
+
+    messages = report.get("messages") or []
+    if messages:
+        heading("Готовые первые сообщения", "HEADING_1")
+        for item in messages:
+            heading(str(item.get("label") or "Вариант"), "HEADING_2")
+            paragraph(str(item.get("text") or ""))
+            paragraph()
+
+    for heading_text, key in [("Риски", "risks"), ("Что проверить на discovery", "discovery_questions"), ("Пробелы исследования", "gaps")]:
+        values = [str(item) for item in report.get(key, []) if str(item)]
+        if values:
+            heading(heading_text, "HEADING_1")
+            bullet_items(values)
+            paragraph()
+
+    sources = report.get("sources") or []
+    if sources:
+        heading("Реестр источников", "HEADING_1")
+        for source in sources:
+            source_id = str(source.get("id") or "")
+            paragraph(f"[{source_id}] {source.get('title') or source.get('url') or 'Источник'}")
+            if source.get("excerpt"):
+                paragraph(str(source["excerpt"]))
+            paragraph(str(source.get("url") or ""))
+            paragraph()
+    return "\n".join(lines) + "\n", headings, bullets, hypotheses
 
 
 def _share_document_by_link(document_id: str) -> None:
