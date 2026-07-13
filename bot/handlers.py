@@ -36,6 +36,7 @@ from notion_store import (
     get_contact_stats,
     update_contact_status,
     update_followup,
+    update_contact_research_url,
     get_scheduled_interviews_for_member,
     list_team_members,
 )
@@ -99,6 +100,7 @@ FOLLOWUP_EDIT_TEXT = 330
 ) = range(100, 106)
 
 SCHEDULE_RECIPIENT, SCHEDULE_TEXT, SCHEDULE_DATE, SCHEDULE_HOUR, SCHEDULE_MINUTE, SCHEDULE_EDIT_VALUE = range(300, 306)
+RESEARCH_LINK_VALUE = 340
 
 SEGMENT_KB = InlineKeyboardMarkup(
     [
@@ -542,6 +544,10 @@ async def research_proposal_callback(update: Update, context: ContextTypes.DEFAU
         await asyncio.to_thread(RESEARCH_STORE.resolve_suggestion, contact_id, update.effective_user.id, "skipped")
         await query.edit_message_text("Хорошо, research для этого контакта пока не запускаем.")
         return
+    if action == "attach":
+        # This action is handled by its ConversationHandler; keep the global
+        # callback harmless when Telegram delivers a stale press.
+        return
     if action != "start":
         return
     await asyncio.to_thread(RESEARCH_STORE.resolve_suggestion, contact_id, update.effective_user.id, "started")
@@ -555,6 +561,32 @@ async def research_proposal_callback(update: Update, context: ContextTypes.DEFAU
         f"После завершения ссылка на Google Docs автоматически появится в Contacts.\n\n/research_status {job['id']}",
         parse_mode="HTML",
     )
+
+
+async def research_link_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    _, _, contact_id = (query.data or "").split(":", 2)
+    context.user_data["research_link_contact_id"] = contact_id
+    await query.message.reply_text("Пришли ссылку на готовый research (Google Doc или другой http(s)-документ). Я сохраню её в Contacts.")
+    return RESEARCH_LINK_VALUE
+
+
+async def research_link_value(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    contact_id = str(context.user_data.pop("research_link_contact_id", ""))
+    url = (update.effective_message.text or "").strip()
+    if not contact_id or not url.startswith(("https://", "http://")):
+        await update.effective_message.reply_text("Нужна корректная ссылка, начинающаяся с https:// или http://.")
+        return ConversationHandler.END
+    try:
+        await asyncio.to_thread(update_contact_research_url, contact_id, url)
+        await asyncio.to_thread(RESEARCH_STORE.resolve_suggestion, contact_id, update.effective_user.id, "external_research")
+    except Exception:
+        logger.exception("Unable to attach external research")
+        await update.effective_message.reply_text("Не удалось сохранить ссылку в Contacts. Попробуй ещё раз позже.")
+        return ConversationHandler.END
+    await update.effective_message.reply_text("Готово: ссылка сохранена в поле «Research компании». Она будет использоваться для следующего outreach и follow-up.")
+    return ConversationHandler.END
 
 
 def _research_job_text(job: dict) -> str:

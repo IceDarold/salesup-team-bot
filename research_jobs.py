@@ -49,6 +49,11 @@ class ResearchJobStore:
                     created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
                     PRIMARY KEY(contact_id, telegram_user_id)
                 );
+                CREATE TABLE IF NOT EXISTS outreach_plans (
+                    contact_id TEXT PRIMARY KEY, research_job_id TEXT NOT NULL DEFAULT '',
+                    status TEXT NOT NULL DEFAULT 'research_ready', plan_json TEXT NOT NULL DEFAULT '{}',
+                    created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+                );
                 CREATE TABLE IF NOT EXISTS research_sources (
                     id INTEGER PRIMARY KEY AUTOINCREMENT, job_id TEXT NOT NULL, url TEXT NOT NULL,
                     title TEXT NOT NULL DEFAULT '', excerpt TEXT NOT NULL DEFAULT '', source_type TEXT NOT NULL DEFAULT '',
@@ -111,6 +116,25 @@ class ResearchJobStore:
         with self._lock:
             row = self._db.execute("SELECT * FROM research_jobs WHERE contact_id=? AND status='completed' AND report != '' ORDER BY completed_at DESC LIMIT 1", (contact_id,)).fetchone()
         return dict(row) if row else None
+
+    def save_outreach_plan(self, contact_id: str, research_job_id: str, plan: dict) -> None:
+        now = _now()
+        with self._tx() as db:
+            db.execute(
+                """INSERT INTO outreach_plans(contact_id,research_job_id,status,plan_json,created_at,updated_at)
+                VALUES (?,?,'research_ready',?,?,?) ON CONFLICT(contact_id) DO UPDATE SET
+                research_job_id=excluded.research_job_id,status=excluded.status,plan_json=excluded.plan_json,updated_at=excluded.updated_at""",
+                (contact_id, research_job_id, json.dumps(plan, ensure_ascii=False), now, now),
+            )
+
+    def outreach_plan(self, contact_id: str) -> dict | None:
+        with self._lock:
+            row = self._db.execute("SELECT * FROM outreach_plans WHERE contact_id=?", (contact_id,)).fetchone()
+        if not row:
+            return None
+        item = dict(row)
+        item["plan"] = json.loads(item.pop("plan_json") or "{}")
+        return item
 
     def get(self, job_id: str, telegram_user_id: int | None = None) -> dict | None:
         sql = "SELECT * FROM research_jobs WHERE id = ?"

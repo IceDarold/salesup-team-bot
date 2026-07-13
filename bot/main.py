@@ -77,6 +77,7 @@ from bot.handlers import (  # noqa: E402
     SCHEDULE_RECIPIENT,
     SCHEDULE_TEXT,
     FOLLOWUP_EDIT_TEXT,
+    RESEARCH_LINK_VALUE,
     SEGMENT,
     SUBJECT,
     add_member_cmd,
@@ -133,6 +134,8 @@ from bot.handlers import (  # noqa: E402
     research_document_handler,
     research_refine_command,
     research_proposal_callback,
+    research_link_entry,
+    research_link_value,
     research_report_command,
     research_status_command,
     schedule_message_command,
@@ -335,6 +338,14 @@ def main() -> None:
     )
     app.add_handler(
         ConversationHandler(
+            entry_points=[CallbackQueryHandler(member_required(research_link_entry), pattern=r"^research_proposal:attach:")],
+            states={RESEARCH_LINK_VALUE: [MessageHandler(filters.TEXT & ~filters.COMMAND, member_required(research_link_value))]},
+            fallbacks=[CommandHandler("cancel", member_required(scheduled_cancel_flow))],
+            name="research_link_flow", persistent=True,
+        )
+    )
+    app.add_handler(
+        ConversationHandler(
             entry_points=[CallbackQueryHandler(member_required(followup_edit_entry), pattern=r"^followup:edit:[^:]+:[123]$")],
             states={FOLLOWUP_EDIT_TEXT: [MessageHandler(filters.TEXT & ~filters.COMMAND, member_required(followup_edit_value))]},
             fallbacks=[CommandHandler("cancel", member_required(scheduled_cancel_flow))],
@@ -517,7 +528,7 @@ async def research_suggestions_job(context) -> None:
                     "Для качественного outreach сначала стоит провести research компании: проверить ICP, триггер, процесс, "
                     "гипотезы и подходящего ЛПР. Запустить?"
                 )
-                buttons = InlineKeyboardMarkup([[InlineKeyboardButton("🔎 Провести research", callback_data=f"research_proposal:start:{contact_id}")], [InlineKeyboardButton("Пока пропустить", callback_data=f"research_proposal:skip:{contact_id}")]])
+                buttons = InlineKeyboardMarkup([[InlineKeyboardButton("🔎 Провести research", callback_data=f"research_proposal:start:{contact_id}")], [InlineKeyboardButton("📎 Прикрепить готовый research", callback_data=f"research_proposal:attach:{contact_id}")], [InlineKeyboardButton("Пока пропустить", callback_data=f"research_proposal:skip:{contact_id}")]])
                 await context.bot.send_message(chat_id=user_id, text=text, parse_mode="HTML", reply_markup=buttons)
         except Exception:
             logger.exception("Unable to propose company research for member %s", member.get("id"))
@@ -608,8 +619,15 @@ async def followup_suggestions_job(context) -> None:
                         from google_docs import read_research_document
                         research = {"external_research": await asyncio.to_thread(read_research_document, str(contact["research_url"]))}
                     payload = await asyncio.to_thread(generate_followup_sequence, contact, history, research)
-                except Exception:
+                except Exception as exc:
                     logger.exception("Unable to generate follow-ups for contact %s", contact_id)
+                    # Do not silently leave the owner waiting when the provider
+                    # itself is unavailable or the key has expired.
+                    if any(marker in str(exc).lower() for marker in ("insufficient permissions", "authentication", "api key")):
+                        try:
+                            await context.bot.send_message(chat_id=user_id, text="Не удалось подготовить follow-up: у OPENAI_API_KEY нет нужного доступа. Обновите ключ на сервере — бот попробует снова.")
+                        except Exception:
+                            logger.exception("Unable to notify about follow-up generation failure")
                     continue
                 payload.update({"recipient": recipient, "contact_name": contact.get("name") or ""})
                 suggestion = store.create(contact_id, str(member["id"]), user_id, payload)

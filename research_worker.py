@@ -68,6 +68,30 @@ def _title(request: str) -> str:
     return "Компания"
 
 
+def _outreach_plan(report: dict, sources: list[dict], claims: list[dict]) -> dict:
+    """Structured, auditable state for the later message/critic stages."""
+    evidence = [
+        {"claim": item.get("claim", ""), "evidence": item.get("evidence", ""), "url": item.get("url", ""),
+         "confidence": item.get("confidence", "hypothesis"), "category": item.get("category", "")}
+        for item in claims
+    ]
+    facts = report.get("company_facts") or []
+    signals = report.get("vacancy_signals") or []
+    pains = report.get("pains") or []
+    return {
+        "qualification": {"status": "needs_review", "reason": "Автоматическая квалификация требует подтверждения человеком."},
+        "evidence_ledger": evidence,
+        "process_map": [],
+        "hypotheses": pains[:4],
+        "selected_angle": {},
+        "contact_strategy": {},
+        "message_strategy": {"status": "pending_human_review"},
+        "facts": facts[:5], "signals": signals[:5],
+        "sources": [{"url": item.get("url", ""), "title": item.get("title", "")} for item in sources],
+        "risks": ["Не использовать hypothesis как подтверждённый факт в сообщении."],
+    }
+
+
 def run_job(store: ResearchJobStore, job: dict) -> None:
     job_id = str(job["id"])
     deadline = datetime.now(timezone.utc) + timedelta(minutes=int(job["max_minutes"]))
@@ -96,6 +120,8 @@ def run_job(store: ResearchJobStore, job: dict) -> None:
         if store.is_cancelled(job_id):
             return
         store.replace_evidence(job_id, sources, claims)
+        if job.get("contact_id"):
+            store.save_outreach_plan(str(job["contact_id"]), job_id, _outreach_plan(report, sources, claims))
         store.update(job_id, status="analyzing", stage="Публикация", progress=96, detail="Сохраняю доказательный отчёт в Google Docs.", source_count=len(sources), report=json.dumps(report, ensure_ascii=False))
         _notify_progress(store.get(job_id) or job)
         url = create_company_research_tab(_title(str(job["request"])), report)
@@ -116,6 +142,8 @@ def run_job(store: ResearchJobStore, job: dict) -> None:
         logger.exception("Research job %s failed", job_id)
         store.update(job_id, status="failed", stage="Ошибка", progress=100, detail="Не удалось завершить исследование.", error=str(exc))
         _notify_progress(store.get(job_id) or job)
+        if "insufficient permissions" in str(exc).lower() or "authentication" in str(exc).lower() or "api key" in str(exc).lower():
+            _telegram("sendMessage", {"chat_id": job["chat_id"], "text": "Research не запущен: у OpenAI API-ключа нет нужного доступа. Обновите OPENAI_API_KEY на сервере и повторите задачу."})
 
 
 def main() -> None:
