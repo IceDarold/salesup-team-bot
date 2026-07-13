@@ -20,7 +20,7 @@ from google_docs import create_company_research_tab
 from research_jobs import ResearchJobStore
 from notion_store import get_contact, update_contact_research_state, update_contact_research_url
 from sales_agent import deep_company_research
-from outreach import build_outreach_plan, quick_qualify
+from outreach import ask_user_for_research_context, build_outreach_plan, quick_qualify
 
 logging.basicConfig(format="%(asctime)s [%(levelname)s] %(name)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger("research-worker")
@@ -185,7 +185,16 @@ def run_job(store: ResearchJobStore, job: dict) -> None:
                          detail="Поиск выполнен, но недостаточно данных, чтобы надёжно продолжить.",
                          report=json.dumps(report, ensure_ascii=False), source_count=len(sources), release_lease=True)
             buttons = json.dumps({"inline_keyboard": [[{"text": "➕ Добавить данные", "callback_data": f"research_input:provide:{job_id}"}]]})
-            _telegram("sendMessage", {"chat_id": job["chat_id"], "text": _clarification_request(job, report), "reply_markup": buttons})
+            try:
+                ask = ask_user_for_research_context(str(job.get("request") or ""), report)
+                question = str(ask.get("question") or "").strip()
+                why = str(ask.get("why") or "").strip()
+                expected = str(ask.get("expected") or "").strip()
+                text = question + (f"\n\nЗачем: {why}" if why else "") + (f"\nПодойдёт: {expected}" if expected else "")
+            except Exception:
+                logger.exception("Agent ask_user failed; using deterministic clarification")
+                text = _clarification_request(job, report)
+            _telegram("sendMessage", {"chat_id": job["chat_id"], "text": text, "reply_markup": buttons})
             return
         store.replace_evidence(job_id, sources, claims)
         plan = _outreach_plan(report, sources, claims, qualification)

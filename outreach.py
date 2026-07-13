@@ -39,3 +39,16 @@ def build_outreach_plan(report: dict, sources: list[dict], claims: list[dict], q
 поставить rewrite_required=true и запретить отправку.''',
     }
     return _json_response(json.dumps(prompt, ensure_ascii=False), model=MODEL)
+
+
+def ask_user_for_research_context(request: str, report: dict) -> dict:
+    """The research agent's bounded ask_user tool: one factual question only."""
+    payload = {"request": request, "gaps": report.get("gaps") or [], "facts": report.get("company_facts") or [], "signals": report.get("vacancy_signals") or []}
+    return _json_response(
+        """Ты вызываешь инструмент ask_user в процессе B2B research. Поиск уже был выполнен, но контекста недостаточно.
+Спроси РОВНО один короткий вопрос на русском, который сильнее всего разблокирует проверяемое исследование.
+Проси только публичный деловой контекст: сайт, ссылку на вакансию, название компании, город, описание продукта.
+Не проси личные данные, не утверждай непроверенные факты. Верни только JSON:
+{"question":"","why":"","expected":""}.\n\nКонтекст:\n""" + json.dumps(payload, ensure_ascii=False),
+        model=MODEL,
+    )
