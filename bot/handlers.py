@@ -595,6 +595,27 @@ def _research_request_for_contact(contact: dict) -> str:
     )
 
 
+def research_proposal_card_text(contact: dict) -> str:
+    """Human-readable context before a user spends time/tokens on research."""
+    fields = [
+        ("Компания", contact.get("company")),
+        ("Сайт", contact.get("company_site")),
+        ("Вакансия / триггер", contact.get("trigger")),
+        ("Дополнительный контекст", contact.get("additional_context")),
+        ("Telegram", contact.get("telegram")),
+        ("Контакт", contact.get("contact")),
+        ("Сегмент", ", ".join(contact.get("segments") or [])),
+        ("Источник", contact.get("source")),
+        ("Статус", contact.get("status")),
+    ]
+    lines = [f"<b>Контакт без research: {html.escape(str(contact.get('name') or 'без имени'))}</b>"]
+    present = [(label, value) for label, value in fields if str(value or "").strip()]
+    if present:
+        lines.extend(["", "<b>Известные данные</b>"])
+        lines.extend(f"<b>{html.escape(label)}:</b> {html.escape(str(value))}" for label, value in present)
+    return "\n".join(lines)
+
+
 async def research_proposal_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     await query.answer()
@@ -610,8 +631,7 @@ async def research_proposal_callback(update: Update, context: ContextTypes.DEFAU
         return
     if action == "choose":
         await query.edit_message_text(
-            f"<b>Research: {html.escape(str(contact.get('name') or 'контакт'))}</b>\n\n"
-            "Выбери глубину исследования. После завершения ссылка на отчёт появится в Contacts.",
+            research_proposal_card_text(contact) + "\n\nВыбери глубину исследования. После завершения ссылка на отчёт появится в Contacts.",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("⚡ Обычный · до 12 минут / 12 источников", callback_data=f"research_proposal:start:{contact_id}")],
@@ -625,7 +645,7 @@ async def research_proposal_callback(update: Update, context: ContextTypes.DEFAU
         return
     if action == "back":
         await query.edit_message_text(
-            f"<b>Контакт без research: {html.escape(str(contact.get('name') or 'без имени'))}</b>\n\nЗапустить research?",
+            research_proposal_card_text(contact) + "\n\nЗапустить research?",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("🔎 Провести research", callback_data=f"research_proposal:choose:{contact_id}")],

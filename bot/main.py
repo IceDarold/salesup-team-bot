@@ -137,6 +137,7 @@ from bot.handlers import (  # noqa: E402
     research_document_handler,
     research_refine_command,
     research_proposal_callback,
+    research_proposal_card_text,
     research_contact_callback,
     research_link_entry,
     research_link_value,
@@ -588,9 +589,8 @@ async def _offer_research(context, store: ResearchJobStore, contact: dict, user_
     if store.has_suggestion(contact_id, user_id) and not revisit_due:
         return True
     await asyncio.to_thread(store.create_suggestion, contact_id, user_id)
-    text = (
-        f"<b>Контакт без research: {html.escape(str(contact.get('name') or 'без имени'))}</b>\n\n"
-        "Для качественного outreach сначала стоит провести research компании: проверить ICP, триггер, процесс, "
+    text = research_proposal_card_text(contact) + (
+        "\n\nДля качественного outreach сначала стоит провести research компании: проверить ICP, триггер, процесс, "
         "гипотезы и подходящего ЛПР. Запустить?"
     )
     await asyncio.to_thread(update_contact_research_state, contact_id, "Proposed")
