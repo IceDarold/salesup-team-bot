@@ -44,7 +44,7 @@ load_dotenv()
 from bot.access import admin_required, init_access_db, member_required  # noqa: E402
 from bot.telegram_user import TelegramUserService  # noqa: E402
 from bot.telegram_web import TelegramTwoFactorServer  # noqa: E402
-from notion_store import create_followup, find_contacts, get_contacts_with_next_step_on, list_team_members, list_followups_for_contacts, stop_contact_followups, update_contact_research_state, update_followup  # noqa: E402
+from notion_store import archive_outreach_message, create_followup, find_contacts, get_contacts_with_next_step_on, list_team_members, list_followups_for_contacts, stop_contact_followups, update_contact_research_state, update_followup  # noqa: E402
 from followups import FollowupSuggestionStore, generate_adaptive_followup, generate_followup_sequence  # noqa: E402
 from notion_store import get_contact_status_options  # noqa: E402
 from insights import analyze_contact_status  # noqa: E402
@@ -187,6 +187,7 @@ TELEGRAM_WRITE_TIMEOUT = int(os.getenv("TELEGRAM_WRITE_TIMEOUT", "600"))
 TELEGRAM_CONNECT_TIMEOUT = int(os.getenv("TELEGRAM_CONNECT_TIMEOUT", "30"))
 TELEGRAM_POOL_TIMEOUT = int(os.getenv("TELEGRAM_POOL_TIMEOUT", "30"))
 CONTACT_STATUS_MAX_MESSAGES = int(os.getenv("CONTACT_STATUS_MAX_MESSAGES", "500"))
+OUTREACH_PROPOSAL_TTL_MINUTES = max(1, int(os.getenv("OUTREACH_PROPOSAL_TTL_MINUTES", "10")))
 NEXT_STEP_REMINDER_TIME = os.getenv("NEXT_STEP_REMINDER_TIME", "09:00")
 NEXT_STEP_REMINDER_TIMEZONE = os.getenv("NEXT_STEP_REMINDER_TIMEZONE", "Asia/Nicosia")
 PERSISTENCE_PATH = Path(os.getenv("BOT_PERSISTENCE_PATH", "data/bot-state.pickle"))
@@ -520,9 +521,43 @@ def schedule_scheduled_messages(app: Application) -> None:
 
 def schedule_outreach_audit(app: Application) -> None:
     """One ordered audit replaces independent research and follow-up scans."""
-    legacy = os.getenv("FOLLOWUP_SCAN_SECONDS", os.getenv("OUTREACH_RESEARCH_SCAN_SECONDS", "3600"))
-    interval = max(900, int(os.getenv("OUTREACH_AUDIT_SECONDS", legacy)))
-    app.job_queue.run_repeating(outreach_audit_job, interval=interval, first=45, name="outreach_audit")
+    # The same job runs each minute to expire proposals on time. It performs the
+    # expensive Notion/Telegram scan only once per OUTREACH_AUDIT_SECONDS.
+    app.job_queue.run_repeating(outreach_audit_job, interval=60, first=45, name="outreach_audit")
+
+
+async def _expire_outreach_proposals(context) -> None:
+    """Expire unanswered action cards and replace their live Telegram UI."""
+    followups = FollowupSuggestionStore().expire_pending(older_than_minutes=OUTREACH_PROPOSAL_TTL_MINUTES)
+    research_store = ResearchJobStore()
+    research = await asyncio.to_thread(research_store.expire_suggestions, OUTREACH_PROPOSAL_TTL_MINUTES)
+    for item in research:
+        await asyncio.to_thread(update_contact_research_state, str(item["contact_id"]), "Not started")
+    for item, text in [
+        *[(item, "Предложение follow-up сгорело: за 10 минут решения не было. Аудит сможет предложить новую цепочку позже.") for item in followups],
+        *[(item, "Предложение research сгорело: за 10 минут решения не было. Аудит сможет предложить его снова позже.") for item in research],
+    ]:
+        if not item.get("message_id"):
+            continue
+        try:
+            await context.bot.edit_message_text(chat_id=int(item["telegram_user_id"]), message_id=int(item["message_id"]), text=text)
+        except Exception:
+            logger.info("Could not replace expired outreach proposal message", exc_info=True)
+
+
+async def _invalidate_followup_proposals(context, contact_id: str, telegram_user_id: int) -> None:
+    """A real reply makes an unapproved follow-up proposal unsafe to accept."""
+    items = FollowupSuggestionStore().expire_pending(older_than_minutes=0, contact_id=contact_id, status="invalidated")
+    for item in items:
+        if not item.get("message_id"):
+            continue
+        try:
+            await context.bot.edit_message_text(
+                chat_id=telegram_user_id, message_id=int(item["message_id"]),
+                text="Предложение follow-up больше не актуально: контакт уже ответил.",
+            )
+        except Exception:
+            logger.info("Could not replace invalidated follow-up proposal", exc_info=True)
 
 
 def _research_revisit_due(contact: dict) -> bool:
@@ -551,8 +586,7 @@ async def _offer_research(context, store: ResearchJobStore, contact: dict, user_
         await asyncio.to_thread(update_contact_research_state, contact_id, "Not started")
     if store.has_suggestion(contact_id, user_id) and not revisit_due:
         return True
-    if not await asyncio.to_thread(store.create_suggestion, contact_id, user_id) and not revisit_due:
-        return True
+    await asyncio.to_thread(store.create_suggestion, contact_id, user_id)
     text = (
         f"<b>Контакт без research: {html.escape(str(contact.get('name') or 'без имени'))}</b>\n\n"
         "Для качественного outreach сначала стоит провести research компании: проверить ICP, триггер, процесс, "
@@ -565,7 +599,8 @@ async def _offer_research(context, store: ResearchJobStore, contact: dict, user_
         [InlineKeyboardButton("Вернуться позже", callback_data=f"research_proposal:later:{contact_id}")],
         [InlineKeyboardButton("Не делать research", callback_data=f"research_proposal:skip:{contact_id}")],
     ])
-    await context.bot.send_message(chat_id=user_id, text=text, parse_mode="HTML", reply_markup=buttons)
+    message = await context.bot.send_message(chat_id=user_id, text=text, parse_mode="HTML", reply_markup=buttons)
+    await asyncio.to_thread(store.set_suggestion_message_id, contact_id, user_id, message.message_id)
     return True
 
 
@@ -646,8 +681,16 @@ async def _reconcile_outbound_messages(contact: dict, member: dict, messages: li
     are put in Outreach messages: this table models our communication sequence,
     while the complete two-sided transcript remains in its Google Doc.
     """
+    # Once a person replies, cold outreach ends. Any following outgoing message
+    # belongs to an ordinary conversation and must not be counted as a follow-up.
+    first_reply = next((index for index, item in enumerate(messages) if not bool(item.get("outgoing"))), len(messages))
+    outgoing = [item for item in messages[:first_reply] if bool(item.get("outgoing"))]
+    allowed_ids = {str(item.get("message_id") or "") for item in outgoing}
+    for row in list(known):
+        if row.get("source") == "Telegram reconciliation" and str(row.get("telegram_message_id") or "") not in allowed_ids:
+            await asyncio.to_thread(archive_outreach_message, str(row["id"]))
+            known.remove(row)
     known_ids = {str(item.get("telegram_message_id") or "") for item in known}
-    outgoing = [item for item in messages if bool(item.get("outgoing"))]
     for index, message in enumerate(outgoing):
         message_id = str(message.get("message_id") or "")
         if not message_id or message_id in known_ids:
@@ -680,6 +723,14 @@ async def outreach_audit_job(context, *, telegram_user_id: int | None = None) ->
     owns every *proposal* so two schedulers cannot race and notify about the same
     contact independently.
     """
+    await _expire_outreach_proposals(context)
+    if telegram_user_id is None:
+        now = datetime.now(timezone.utc)
+        full_interval = max(60, int(os.getenv("OUTREACH_AUDIT_SECONDS", os.getenv("FOLLOWUP_SCAN_SECONDS", "900"))))
+        last_run = getattr(context.application, "_last_outreach_full_audit_at", None)
+        if last_run and (now - last_run).total_seconds() < full_interval:
+            return
+        context.application._last_outreach_full_audit_at = now
     service = getattr(context.application, "_telegram_user_service", None)
     if service is None:
         return
@@ -709,6 +760,7 @@ async def outreach_audit_job(context, *, telegram_user_id: int | None = None) ->
                     existing[contact_id] = await _reconcile_outbound_messages(contact, member, history, existing.get(contact_id, []))
                 active = [item for item in existing.get(contact_id, []) if item.get("status") in {"Черновик", "На согласовании", "Запланировано", "Ожидает подтверждения"}]
                 if any(not bool(item.get("outgoing")) for item in history):
+                    await _invalidate_followup_proposals(context, contact_id, user_id)
                     if active:
                         await asyncio.to_thread(stop_contact_followups, contact_id, "Получен ответ контакта")
                         await asyncio.to_thread(service.cancel_scheduled_messages_for_contact, user_id, contact_id)
@@ -763,7 +815,8 @@ async def outreach_audit_job(context, *, telegram_user_id: int | None = None) ->
                 if not suggestion:
                     continue
                 from bot.handlers import _followup_proposal_buttons, _followup_proposal_text
-                await context.bot.send_message(chat_id=user_id, text=_followup_proposal_text(payload["contact_name"], payload), parse_mode="HTML", reply_markup=_followup_proposal_buttons(suggestion["token"]))
+                message = await context.bot.send_message(chat_id=user_id, text=_followup_proposal_text(payload["contact_name"], payload), parse_mode="HTML", reply_markup=_followup_proposal_buttons(suggestion["token"]))
+                await asyncio.to_thread(followup_store.set_message_id, suggestion["token"], user_id, message.message_id)
         except Exception:
             logger.exception("Unable to audit outreach for member %s", member.get("id"))
 
@@ -802,6 +855,7 @@ async def conversation_archives_job(context) -> None:
                     continue
                 stopped_ids = await asyncio.to_thread(service.cancel_scheduled_messages_for_contact, user_id, contact_id)
                 await asyncio.to_thread(stop_contact_followups, contact_id, "Получен ответ контакта")
+                await _invalidate_followup_proposals(context, contact_id, user_id)
                 await asyncio.to_thread(ResearchJobStore().record_outreach_event, contact_id, "inbound_reply", {"cancelled_followups": len(stopped_ids)})
             statuses = await asyncio.to_thread(get_contact_status_options)
             for contact in sync_result.get("changed_contacts", []):

@@ -335,6 +335,11 @@ def stop_contact_followups(contact_id: str, reason: str) -> list[str]:
     return stopped
 
 
+def archive_outreach_message(message_id: str) -> None:
+    """Remove a bot-reconciled row that is not part of the cold sequence."""
+    _NotionClient().archive_page(message_id)
+
+
 def get_contacts_with_next_step_on(target_date: date) -> list[dict]:
     """Return contacts whose `Дата` is today and have a non-empty next step."""
     response = _NotionClient().query_database_all(
@@ -1098,6 +1103,7 @@ def _followup_from_page(page: dict) -> dict:
         "sent_at": _prop_date(props.get("Отправлено в")),
         "status": _prop_select(props.get("Статус")), "message_type": _prop_select(props.get("Тип сообщения")),
         "telegram_message_id": _prop_text(props.get("Telegram message ID")),
+        "source": _prop_select(props.get("Источник")),
     }
 
 

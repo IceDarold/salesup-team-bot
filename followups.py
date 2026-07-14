@@ -26,6 +26,9 @@ class FollowupSuggestionStore:
                 token TEXT PRIMARY KEY, contact_id TEXT NOT NULL, owner_id TEXT NOT NULL,
                 telegram_user_id INTEGER NOT NULL, payload TEXT NOT NULL, status TEXT NOT NULL,
                 created_at TEXT NOT NULL, decided_at TEXT)""")
+            columns = {row[1] for row in self.db.execute("PRAGMA table_info(followup_suggestions)")}
+            if "message_id" not in columns:
+                self.db.execute("ALTER TABLE followup_suggestions ADD COLUMN message_id INTEGER")
             self.db.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_followup_pending ON followup_suggestions(contact_id, status)")
 
     def create(self, contact_id: str, owner_id: str, telegram_user_id: int, payload: dict) -> dict | None:
@@ -56,12 +59,28 @@ class FollowupSuggestionStore:
             ).fetchone())
 
     def has_suggestion(self, contact_id: str, telegram_user_id: int) -> bool:
-        """A rejection is deliberate: do not spam the owner with the same proposal."""
+        """Expired/invalidated proposals must not block a fresh audit."""
         with self.lock:
             return bool(self.db.execute(
-                "SELECT 1 FROM followup_suggestions WHERE contact_id=? AND telegram_user_id=?",
+                "SELECT 1 FROM followup_suggestions WHERE contact_id=? AND telegram_user_id=? AND status IN ('pending','accepted','rejected')",
                 (contact_id, telegram_user_id),
             ).fetchone())
+
+    def set_message_id(self, token: str, telegram_user_id: int, message_id: int) -> None:
+        with self.lock, self.db:
+            self.db.execute("UPDATE followup_suggestions SET message_id=? WHERE token=? AND telegram_user_id=? AND status='pending'", (message_id, token, telegram_user_id))
+
+    def expire_pending(self, *, older_than_minutes: int, contact_id: str | None = None, status: str = "expired") -> list[dict]:
+        cutoff = (datetime.now() - timedelta(minutes=older_than_minutes)).isoformat()
+        where = "status='pending' AND created_at <= ?"
+        params: list[object] = [cutoff]
+        if contact_id:
+            where += " AND contact_id=?"
+            params.append(contact_id)
+        with self.lock, self.db:
+            rows = [dict(row) for row in self.db.execute(f"SELECT * FROM followup_suggestions WHERE {where}", params).fetchall()]
+            self.db.execute(f"UPDATE followup_suggestions SET status=?, decided_at=? WHERE {where}", [status, datetime.now().isoformat(), *params])
+        return rows
 
     def update_payload(self, token: str, telegram_user_id: int, payload: dict) -> None:
         with self.lock, self.db:

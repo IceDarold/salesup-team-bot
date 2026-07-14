@@ -96,6 +96,9 @@ class ResearchJobStore:
                 db.execute("ALTER TABLE research_jobs ADD COLUMN mode TEXT NOT NULL DEFAULT 'standard'")
             if "checkpoint_json" not in columns:
                 db.execute("ALTER TABLE research_jobs ADD COLUMN checkpoint_json TEXT NOT NULL DEFAULT '{}'")
+            suggestion_columns = {row[1] for row in db.execute("PRAGMA table_info(research_suggestions)").fetchall()}
+            if "message_id" not in suggestion_columns:
+                db.execute("ALTER TABLE research_suggestions ADD COLUMN message_id INTEGER")
             db.execute("CREATE INDEX IF NOT EXISTS idx_research_jobs_contact ON research_jobs(contact_id, created_at)")
 
     @contextmanager
@@ -122,13 +125,29 @@ class ResearchJobStore:
 
     def has_suggestion(self, contact_id: str, telegram_user_id: int) -> bool:
         with self._lock:
-            return bool(self._db.execute("SELECT 1 FROM research_suggestions WHERE contact_id=? AND telegram_user_id=?", (contact_id, telegram_user_id)).fetchone())
+            return bool(self._db.execute("SELECT 1 FROM research_suggestions WHERE contact_id=? AND telegram_user_id=? AND status='pending'", (contact_id, telegram_user_id)).fetchone())
 
     def create_suggestion(self, contact_id: str, telegram_user_id: int) -> bool:
         now = _now()
         with self._tx() as db:
-            result = db.execute("INSERT OR IGNORE INTO research_suggestions VALUES (?, ?, 'pending', ?, ?)", (contact_id, telegram_user_id, now, now))
-        return bool(result.rowcount)
+            db.execute(
+                """INSERT INTO research_suggestions(contact_id,telegram_user_id,status,created_at,updated_at)
+                VALUES (?,?,'pending',?,?) ON CONFLICT(contact_id,telegram_user_id) DO UPDATE SET
+                status='pending', created_at=excluded.created_at, updated_at=excluded.updated_at, message_id=NULL""",
+                (contact_id, telegram_user_id, now, now),
+            )
+        return True
+
+    def set_suggestion_message_id(self, contact_id: str, telegram_user_id: int, message_id: int) -> None:
+        with self._tx() as db:
+            db.execute("UPDATE research_suggestions SET message_id=? WHERE contact_id=? AND telegram_user_id=? AND status='pending'", (message_id, contact_id, telegram_user_id))
+
+    def expire_suggestions(self, older_than_minutes: int) -> list[dict]:
+        cutoff = (datetime.now(timezone.utc) - timedelta(minutes=older_than_minutes)).isoformat()
+        with self._tx() as db:
+            rows = [dict(row) for row in db.execute("SELECT * FROM research_suggestions WHERE status='pending' AND created_at <= ?", (cutoff,)).fetchall()]
+            db.execute("UPDATE research_suggestions SET status='expired', updated_at=? WHERE status='pending' AND created_at <= ?", (_now(), cutoff))
+        return rows
 
     def resolve_suggestion(self, contact_id: str, telegram_user_id: int, status: str) -> None:
         with self._tx() as db:
