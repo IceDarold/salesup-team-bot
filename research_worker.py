@@ -50,7 +50,7 @@ def _notify_progress(job: dict) -> None:
         return
     text = (f"Исследование <code>{html.escape(str(job['id']))}</code>\n"
             f"{html.escape(str(job.get('stage') or 'В работе'))}: {html.escape(str(job.get('detail') or ''))}\n"
-            f"Прогресс: {int(job.get('progress') or 0)}% · источников: {int(job.get('source_count') or 0)}\n\n"
+            f"Режим: {html.escape(str(job.get('mode') or 'standard'))} · прогресс: {int(job.get('progress') or 0)}% · источников: {int(job.get('source_count') or 0)} · итераций: {int(job.get('iteration') or 0)}/{int(job.get('max_iterations') or 0)}\n\n"
             f"/research_status {job['id']} · /research_cancel {job['id']}")
     _telegram("editMessageText", {"chat_id": job["chat_id"], "message_id": message_id, "text": text[:4000], "parse_mode": "HTML"})
 
@@ -124,6 +124,20 @@ def _needs_more_context(report: dict, sources: list[dict]) -> bool:
     facts = report.get("company_facts") or []
     signals = report.get("vacancy_signals") or []
     return not facts and not signals
+
+
+def _needs_offer_context(job: dict) -> bool:
+    """Research can identify a company without knowing our offer; outreach cannot."""
+    text = (str(job.get("request") or "") + "\n" + str(job.get("refinement") or "")).lower()
+    markers = ("наш продукт:", "мы предлагаем", "наша услуга", "наш оффер", "продаём", "продаем")
+    return not any(marker in text for marker in markers)
+
+
+def _offer_context_question() -> str:
+    return (
+        "Компания уже изучена. Чтобы не предложить ей её же услугу, уточни: "
+        "что именно мы продаём, какой измеримый результат/кейс можем подтвердить и какой следующий шаг допустим?"
+    )
 
 
 def _clarification_request(job: dict, report: dict) -> str:
@@ -205,10 +219,18 @@ def run_job(store: ResearchJobStore, job: dict) -> None:
             store.update(job_id, status="completed", stage="Лид отклонён", progress=100, detail=str(qualification.get("reason") or "Не рекомендую писать."), report=json.dumps({"qualification": qualification}, ensure_ascii=False))
             _telegram("sendMessage", {"chat_id": job["chat_id"], "text": f"По быстрой квалификации: <b>не рекомендую писать</b>.\n{html.escape(str(qualification.get('reason') or 'Недостаточно оснований.'))}", "parse_mode": "HTML"})
             return
+        checkpoint = store.checkpoint(job_id)
+
+        def save_checkpoint(state: dict) -> None:
+            store.replace_evidence(job_id, state.get("sources", []), state.get("claims", []))
+            store.update(job_id, checkpoint=state, source_count=len(state.get("sources", [])),
+                         detail=f"Сохранён этап: {state.get('phase', 'research')}.")
+
         report, sources, claims = deep_company_research(
             str(job["request"]), max_iterations=int(job["max_iterations"]), max_sources=int(job["max_sources"]),
             refinement=str(job.get("refinement") or ""), progress=progress, cancelled=lambda: store.is_cancelled(job_id),
-            trace=lambda kind, title, body: _trace(store, job, kind, title, body),
+            trace=lambda kind, title, body: _trace(store, job, kind, title, body), checkpoint=checkpoint,
+            save_checkpoint=save_checkpoint,
         )
         if store.is_cancelled(job_id):
             return
@@ -228,6 +250,16 @@ def run_job(store: ResearchJobStore, job: dict) -> None:
                 logger.exception("Agent ask_user failed; using deterministic clarification")
                 text = _clarification_request(job, report)
             _telegram("sendMessage", {"chat_id": job["chat_id"], "text": text, "reply_markup": buttons})
+            return
+        if job.get("contact_id") and _needs_offer_context(job):
+            state = {"report": report, "sources": sources, "claims": claims, "phase": "offer_context"}
+            store.replace_evidence(job_id, sources, claims)
+            store.update(job_id, status="waiting_input", stage="Нужен контекст оффера", progress=92,
+                         detail="Компания изучена; нужен контекст нашего предложения для outreach.",
+                         report=json.dumps(report, ensure_ascii=False), source_count=len(sources), checkpoint=state,
+                         release_lease=True)
+            buttons = json.dumps({"inline_keyboard": [[{"text": "➕ Описать наше предложение", "callback_data": f"research_input:provide:{job_id}"}]]})
+            _telegram("sendMessage", {"chat_id": job["chat_id"], "text": _offer_context_question(), "reply_markup": buttons})
             return
         store.replace_evidence(job_id, sources, claims)
         plan = _outreach_plan(report, sources, claims, qualification)
@@ -266,22 +298,38 @@ def run_job(store: ResearchJobStore, job: dict) -> None:
         store.update(job_id, release_lease=True)
         _notify_progress(store.get(job_id) or job)
     except TimeoutError as exc:
-        store.update(job_id, status="failed", stage="Превышен лимит", progress=100, detail=str(exc), error=str(exc))
-        if job.get("contact_id"):
+        partial = store.checkpoint(job_id)
+        has_work = bool(partial.get("sources") or partial.get("draft"))
+        status = "partial" if has_work else "failed"
+        stage = "Нужна финализация" if has_work else "Превышен лимит"
+        detail = "Сохранены источники и черновик; можно продолжить без нового поиска." if has_work else str(exc)
+        store.update(job_id, status=status, stage=stage, progress=90 if has_work else 100, detail=detail, error=str(exc), release_lease=True)
+        if job.get("contact_id") and not has_work:
             try:
                 update_contact_research_state(str(job["contact_id"]), "Failed")
             except Exception:
                 logger.exception("Unable to mark timed out research as failed")
         _notify_progress(store.get(job_id) or job)
+        if has_work:
+            buttons = json.dumps({"inline_keyboard": [[{"text": "▶️ Завершить research", "callback_data": f"research_resume:{job_id}"}]]})
+            _telegram("sendMessage", {"chat_id": job["chat_id"], "text": f"Research <code>{job_id}</code> остановлен по лимиту, но промежуточные данные сохранены.", "parse_mode": "HTML", "reply_markup": buttons})
     except Exception as exc:
         logger.exception("Research job %s failed", job_id)
-        store.update(job_id, status="failed", stage="Ошибка", progress=100, detail="Не удалось завершить исследование.", error=str(exc))
-        if job.get("contact_id"):
+        partial = store.checkpoint(job_id)
+        has_work = bool(partial.get("sources") or partial.get("draft"))
+        status = "partial" if has_work else "failed"
+        stage = "Нужна финализация" if has_work else "Ошибка"
+        detail = "Сохранены источники и черновик; можно продолжить без нового поиска." if has_work else "Не удалось завершить исследование."
+        store.update(job_id, status=status, stage=stage, progress=90 if has_work else 100, detail=detail, error=str(exc), release_lease=True)
+        if job.get("contact_id") and not has_work:
             try:
                 update_contact_research_state(str(job["contact_id"]), "Failed")
             except Exception:
                 logger.exception("Unable to mark Contact research as failed")
         _notify_progress(store.get(job_id) or job)
+        if has_work:
+            buttons = json.dumps({"inline_keyboard": [[{"text": "▶️ Завершить research", "callback_data": f"research_resume:{job_id}"}]]})
+            _telegram("sendMessage", {"chat_id": job["chat_id"], "text": f"Research <code>{job_id}</code> остановлен, но промежуточные данные сохранены. Можно завершить его без нового поиска.", "parse_mode": "HTML", "reply_markup": buttons})
         if "insufficient permissions" in str(exc).lower() or "authentication" in str(exc).lower() or "api key" in str(exc).lower():
             _telegram("sendMessage", {"chat_id": job["chat_id"], "text": "Research не запущен: у OpenAI API-ключа нет нужного доступа. Обновите OPENAI_API_KEY на сервере и повторите задачу."})
     finally:

@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import json
 import os
+import re
+from urllib.parse import urlsplit, urlunsplit
 from contextvars import ContextVar
 from typing import Callable
 
@@ -140,17 +142,33 @@ def deep_company_research(
     cancelled: Callable[[], bool],
     trace: Callable[[str, str, str], None],
     refinement: str = "",
+    checkpoint: dict | None = None,
+    save_checkpoint: Callable[[dict], None] | None = None,
 ) -> tuple[dict, list[dict], list[dict]]:
     """Run a bounded plan/search/evidence/synthesis/critique research loop.
 
     The caller persists the returned ledger. This function intentionally has no
     database knowledge, making it safe to resume a queued job in another process.
     """
+    checkpoint = checkpoint or {}
+    if checkpoint.get("report") and checkpoint.get("sources"):
+        trace("model", "Использую сохранённый результат", "Поиск уже завершён ранее; повторяю только последующие этапы без новых web search-вызовов.")
+        return checkpoint["report"], checkpoint["sources"], checkpoint.get("claims", [])
+    if checkpoint.get("draft") and checkpoint.get("sources"):
+        sources = checkpoint["sources"][:max_sources]
+        claims = checkpoint.get("claims", [])
+        catalog = _source_catalog(sources)
+        progress("reviewing", 90, "Продолжаю с сохранённого черновика: повторяю только критическую проверку.")
+        trace("model", "Критическая проверка — повтор", f"Использую сохранённый черновик и {len(catalog)} источников без нового поиска.")
+        report = _normalize_report(_json_response(_review_prompt(catalog, checkpoint["draft"]), model=os.getenv("COMPANY_RESEARCH_MODEL", "gpt-5.6-terra")), catalog)
+        if save_checkpoint:
+            save_checkpoint({**checkpoint, "report": report, "phase": "completed"})
+        return report, sources, claims
     model = os.getenv("COMPANY_RESEARCH_MODEL", "gpt-5.6-terra")
     scope = f"Запрос: {request}\nУточнение пользователя: {refinement or 'нет'}"
     progress("planning", 8, "Формирую план исследования и список проверяемых вопросов.")
     trace("model", "План исследования — вызов", "Модель формирует вопросы и поисковые запросы по исходным ссылкам и контексту.")
-    plan = _json_response(
+    plan = checkpoint.get("plan") if isinstance(checkpoint.get("plan"), dict) else _json_response(
         """Ты планировщик B2B-исследований. Верни ТОЛЬКО JSON вида
 {"questions":["..."],"queries":["..."],"success_criteria":["..."]}.
 Составь до 10 точных поисковых запросов: компания, продукт, вакансия, основатели,
@@ -159,12 +177,12 @@ def deep_company_research(
         model=model,
     )
     trace("model", "План исследования — результат", _preview_json(plan))
-    queries = [str(q) for q in plan.get("queries", []) if str(q).strip()][:10]
+    queries = [str(q) for q in checkpoint.get("queries", plan.get("queries", [])) if _usable_query(str(q))][:10]
     if not queries:
         queries = [request]
-    all_sources: dict[str, dict] = {}
-    all_claims: list[dict] = []
-    gaps: list[str] = []
+    all_sources = {_source_key(item): item for item in checkpoint.get("sources", []) if isinstance(item, dict) and _source_key(item)}
+    all_claims = [item for item in checkpoint.get("claims", []) if isinstance(item, dict)]
+    gaps = [str(item) for item in checkpoint.get("gaps", []) if str(item).strip()]
     for iteration in range(max(1, max_iterations)):
         if cancelled():
             raise InterruptedError("Research cancelled")
@@ -176,9 +194,9 @@ def deep_company_research(
         trace("tool_call", f"web_search — вызов #{iteration + 1}", "Поисковые запросы:\n" + "\n".join(f"• {query}" for query in batch))
         ledger = _json_response(
             """Ты фактчекер B2B-исследования. Используй web search и верни ТОЛЬКО JSON:
-{"sources":[{"url":"https://...","title":"","excerpt":"короткий факт или цитата","source_type":"official|news|job|social|review","published_at":"","relevance":0.0}],
+{"sources":[{"url":"https://...","title":"","excerpt":"короткий факт или цитата","source_type":"official|independent|self_published_case|job|social|aggregator","published_at":"","relevance":0.0}],
 "claims":[{"claim":"проверяемый факт или осторожная гипотеза","evidence":"короткий фрагмент","url":"https://...","confidence":"high|medium|hypothesis","category":"company|vacancy|founder|market|pain|stakeholder"}],
-"next_queries":["..."],"gaps":["..."]}.
+"next_queries":["..."],"gaps":["..."],"goals_closed":["identity|trigger|process|stakeholder"],"open_questions":["..."]}.
 Каждый claim с confidence high/medium обязан иметь URL из sources. Не выдумывай URL,
 контакты или цифры. Предпочитай первичные источники. Максимум 12 источников и 20 claims.
 
@@ -190,8 +208,10 @@ def deep_company_research(
         trace("tool_result", f"web_search — результат #{iteration + 1}", _search_preview(ledger))
         for source in ledger.get("sources", []):
             if isinstance(source, dict) and str(source.get("url") or "").startswith(("http://", "https://")):
-                all_sources[str(source["url"])] = source
-        valid_urls = set(all_sources)
+                key = _source_key(source)
+                if key:
+                    all_sources[key] = source
+        valid_urls = {str(item.get("url") or "") for item in all_sources.values()}
         for claim in ledger.get("claims", []):
             if not isinstance(claim, dict) or not str(claim.get("claim") or "").strip():
                 continue
@@ -201,14 +221,22 @@ def deep_company_research(
                 claim["evidence"] = "Источник не прошёл проверку; требует подтверждения."
                 claim["url"] = ""
             all_claims.append(claim)
+        all_claims = _dedupe_claims(all_claims)
         gaps = [str(g) for g in ledger.get("gaps", []) if str(g).strip()]
-        if len(all_sources) >= max_sources:
+        sources_now = _dedupe_sources(list(all_sources.values()))[:max_sources]
+        if save_checkpoint:
+            save_checkpoint({"plan": plan, "sources": sources_now, "claims": all_claims, "gaps": gaps,
+                             "open_questions": ledger.get("open_questions", []), "phase": "collecting"})
+        if len(sources_now) >= max_sources:
             break
-        queries.extend(str(q) for q in ledger.get("next_queries", []) if str(q).strip())
+        if _research_goals_met(ledger, sources_now, all_claims):
+            trace("model", "Поиск остановлен", "Закрыты идентификация, ЛПР и процесс; следующая итерация не даст новой ценности.")
+            break
+        queries.extend(str(q) for q in ledger.get("next_queries", []) if _usable_query(str(q)))
         queries = list(dict.fromkeys(queries))[:12]
         if not queries:
             break
-    sources = list(all_sources.values())[:max_sources]
+    sources = _dedupe_sources(list(all_sources.values()))[:max_sources]
     source_catalog = _source_catalog(sources)
     source_urls = {str(item.get("url") or "") for item in sources}
     claims = [claim for claim in all_claims if str(claim.get("url") or "") in source_urls or str(claim.get("confidence") or "") == "hypothesis"]
@@ -223,6 +251,8 @@ def deep_company_research(
         _report_prompt(scope, dossier), model=model,
     )
     trace("model", "Синтез стратегии — результат", _preview_json(draft))
+    if save_checkpoint:
+        save_checkpoint({"plan": plan, "sources": sources, "claims": claims, "gaps": gaps, "draft": draft, "phase": "reviewing"})
     if cancelled():
         raise InterruptedError("Research cancelled")
     progress("reviewing", 90, "Проверяю отчёт: убираю неподтверждённые утверждения.")
@@ -233,6 +263,62 @@ def deep_company_research(
     report = _normalize_report(report, source_catalog)
     trace("model", "Критическая проверка — результат", _preview_json(report))
     return report, sources, claims
+
+
+def _source_key(source: dict) -> str:
+    """Collapse URL variants and mirrored case pages before counting evidence."""
+    raw = str(source.get("url") or "").strip()
+    if not raw:
+        return ""
+    parsed = urlsplit(raw)
+    path = re.sub(r"/+", "/", parsed.path.rstrip("/"))
+    return urlunsplit((parsed.scheme.lower(), parsed.netloc.lower(), path, "", ""))
+
+
+def _dedupe_claims(claims: list[dict]) -> list[dict]:
+    seen, result = set(), []
+    for claim in claims:
+        key = re.sub(r"\W+", "", str(claim.get("claim") or "").lower())[:180]
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        result.append(claim)
+    return result
+
+
+def _dedupe_sources(sources: list[dict]) -> list[dict]:
+    """A mirrored case is one piece of evidence, not two independent sources."""
+    priority = {"official": 5, "independent": 4, "job": 3, "social": 2, "self_published_case": 1, "aggregator": 0}
+    by_title: dict[str, dict] = {}
+    for source in sources:
+        title = re.sub(r"\W+", "", str(source.get("title") or "").lower())[:180]
+        key = title or _source_key(source)
+        if not key:
+            continue
+        old = by_title.get(key)
+        if not old or priority.get(str(source.get("source_type") or ""), 0) > priority.get(str(old.get("source_type") or ""), 0):
+            by_title[key] = source
+    return list(by_title.values())
+
+
+def _usable_query(query: str) -> bool:
+    text = query.strip()
+    if not text:
+        return False
+    # Product, offer and CTA are internal context: search cannot answer them.
+    blocked = ("уточнить продукт", "услугу отправителя", "какой продукт мы", "наш оффер")
+    return not any(token in text.lower() for token in blocked)
+
+
+def _research_goals_met(ledger: dict, sources: list[dict], claims: list[dict]) -> bool:
+    closed = {str(item).lower() for item in ledger.get("goals_closed", [])}
+    categories = {str(item.get("category") or "") for item in claims if item.get("confidence") in {"high", "medium"}}
+    identity = "identity" in closed or "company" in categories
+    stakeholder = "stakeholder" in closed or "stakeholder" in categories
+    process = "process" in closed or len(claims) >= 3
+    # A missing trigger is an acceptable, explicitly recorded result.
+    trigger = "trigger" in closed or "vacancy" in categories or any("триггер" in str(item).lower() for item in ledger.get("gaps", []))
+    return len(sources) >= 5 and identity and stakeholder and process and trigger
 
 
 def _source_catalog(sources: list[dict]) -> list[dict]:

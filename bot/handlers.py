@@ -553,8 +553,8 @@ async def research_contact_callback(update: Update, context: ContextTypes.DEFAUL
         details.append(f"Сайт: {html.escape(str(contact['company_site']))}")
     if contact.get("trigger"):
         details.append(f"Триггер: {html.escape(str(contact['trigger']))}")
-    details.append("\nЗапустить глубокий research, прикрепить готовый документ или пропустить?")
-    buttons = InlineKeyboardMarkup([[InlineKeyboardButton("🔎 Провести research", callback_data=f"{RESEARCH_PROPOSAL_PREFIX}start:{contact_id}")], [InlineKeyboardButton("📎 Прикрепить готовый research", callback_data=f"{RESEARCH_PROPOSAL_PREFIX}attach:{contact_id}")], [InlineKeyboardButton("Вернуться позже", callback_data=f"{RESEARCH_PROPOSAL_PREFIX}later:{contact_id}")], [InlineKeyboardButton("Не делать research", callback_data=f"{RESEARCH_PROPOSAL_PREFIX}skip:{contact_id}")]])
+    details.append("\nВыбери глубину: стандартный research обычно достаточно; deep — только для особенно важного лида.")
+    buttons = InlineKeyboardMarkup([[InlineKeyboardButton("🔎 Standard · до 3 итераций", callback_data=f"{RESEARCH_PROPOSAL_PREFIX}start:{contact_id}")], [InlineKeyboardButton("🔬 Deep · до 6 итераций", callback_data=f"{RESEARCH_PROPOSAL_PREFIX}start_deep:{contact_id}")], [InlineKeyboardButton("📎 Прикрепить готовый research", callback_data=f"{RESEARCH_PROPOSAL_PREFIX}attach:{contact_id}")], [InlineKeyboardButton("Вернуться позже", callback_data=f"{RESEARCH_PROPOSAL_PREFIX}later:{contact_id}")], [InlineKeyboardButton("Не делать research", callback_data=f"{RESEARCH_PROPOSAL_PREFIX}skip:{contact_id}")]])
     await query.edit_message_text("\n".join(details), parse_mode="HTML", reply_markup=buttons)
 
 
@@ -623,17 +623,18 @@ async def research_proposal_callback(update: Update, context: ContextTypes.DEFAU
         # This action is handled by its ConversationHandler; keep the global
         # callback harmless when Telegram delivers a stale press.
         return
-    if action != "start":
+    if action not in {"start", "start_deep"}:
         return
+    mode = "deep" if action == "start_deep" else "standard"
     await asyncio.to_thread(RESEARCH_STORE.resolve_suggestion, contact_id, update.effective_user.id, "started")
     await asyncio.to_thread(update_contact_research_state, contact_id, "In progress")
     await query.edit_message_text("Создаю задачу глубокого исследования…")
     job = await asyncio.to_thread(
         RESEARCH_STORE.create, telegram_user_id=update.effective_user.id, chat_id=update.effective_chat.id,
-        request=_research_request_for_contact(contact), progress_message_id=query.message.message_id, contact_id=contact_id,
+        request=_research_request_for_contact(contact), progress_message_id=query.message.message_id, contact_id=contact_id, mode=mode,
     )
     await query.edit_message_text(
-        f"Research <code>{job['id']}</code> поставлен в очередь для «{html.escape(str(contact.get('name') or 'контакта'))}».\n"
+        f"Research <code>{job['id']}</code> ({html.escape(mode)}) поставлен в очередь для «{html.escape(str(contact.get('name') or 'контакта'))}».\n"
         f"После завершения ссылка на Google Docs автоматически появится в Contacts.\n\n/research_status {job['id']}",
         parse_mode="HTML",
     )
@@ -668,7 +669,7 @@ async def research_link_value(update: Update, context: ContextTypes.DEFAULT_TYPE
 def _research_job_text(job: dict) -> str:
     lines = [
         f"Исследование <code>{html.escape(str(job['id']))}</code>",
-        f"Статус: <b>{html.escape(str(job.get('stage') or job.get('status')))}</b> ({int(job.get('progress') or 0)}%)",
+        f"Статус: <b>{html.escape(str(job.get('stage') or job.get('status')))}</b> ({int(job.get('progress') or 0)}%) · режим: {html.escape(str(job.get('mode') or 'standard'))}",
         f"Источников: {int(job.get('source_count') or 0)} · итераций: {int(job.get('iteration') or 0)}/{int(job.get('max_iterations') or 0)}",
     ]
     if job.get("detail"):
@@ -677,6 +678,8 @@ def _research_job_text(job: dict) -> str:
         lines.append(f"Отчёт: {html.escape(str(job['google_url']))}")
     if job.get("error"):
         lines.append(f"Ошибка: {html.escape(str(job['error'])[:500])}")
+    if job.get("status") in {"partial", "failed", "waiting_input"} and str(job.get("checkpoint_json") or "{}") != "{}":
+        lines.append(f"Продолжить: /research_resume {html.escape(str(job['id']))}")
     return "\n".join(lines)
 
 
@@ -699,6 +702,26 @@ async def research_cancel_command(update: Update, context: ContextTypes.DEFAULT_
         await update.effective_message.reply_text("Задача отменена. Worker остановится на ближайшей безопасной точке.")
     else:
         await update.effective_message.reply_text("Нельзя отменить: задача не найдена или уже завершена.")
+
+
+async def research_resume_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not context.args:
+        await update.effective_message.reply_text("Использование: /research_resume <ID исследования>")
+        return
+    if await asyncio.to_thread(RESEARCH_STORE.resume, context.args[0], update.effective_user.id):
+        await update.effective_message.reply_text(f"Продолжаю research {context.args[0]} с сохранённого этапа — без повторного web search.")
+    else:
+        await update.effective_message.reply_text("Продолжить нельзя: нет сохранённого промежуточного результата или задача уже завершена.")
+
+
+async def research_resume_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+    _, job_id = (query.data or "").split(":", 1)
+    if await asyncio.to_thread(RESEARCH_STORE.resume, job_id, update.effective_user.id):
+        await query.edit_message_text(f"Продолжаю research <code>{job_id}</code> с сохранённого этапа — без повторного поиска.", parse_mode="HTML")
+    else:
+        await query.edit_message_text("Не удалось продолжить: задача уже завершена или у неё нет checkpoint.")
 
 
 async def research_report_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

@@ -31,6 +31,18 @@ class ResearchJobStoreTests(unittest.TestCase):
         self.assertTrue(self.store.refine(self.job["id"], 10, "проверь рынок"))
         self.assertEqual(self.store.get(self.job["id"])["status"], "queued")
 
+    def test_checkpoint_can_resume_without_erasing_evidence(self):
+        self.store.update(self.job["id"], checkpoint={"sources": [{"url": "https://example.com"}], "draft": {"executive_summary": "draft"}})
+        self.store.update(self.job["id"], status="partial", stage="Нужна финализация")
+        self.assertTrue(self.store.resume(self.job["id"], 10))
+        resumed = self.store.get(self.job["id"])
+        self.assertEqual(resumed["status"], "queued")
+        self.assertEqual(self.store.checkpoint(self.job["id"])["draft"]["executive_summary"], "draft")
+
+    def test_standard_mode_is_bounded(self):
+        self.assertEqual(self.job["mode"], "standard")
+        self.assertEqual((self.job["max_iterations"], self.job["max_sources"]), (3, 12))
+
 
 if __name__ == "__main__":
     unittest.main()

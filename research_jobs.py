@@ -12,7 +12,12 @@ from pathlib import Path
 from typing import Iterator
 
 
-TERMINAL = {"completed", "failed", "cancelled"}
+TERMINAL = {"completed", "failed", "cancelled", "partial"}
+RESEARCH_MODES = {
+    "quick": (2, 8, 8),
+    "standard": (3, 12, 12),
+    "deep": (6, 25, 25),
+}
 
 
 def _now() -> str:
@@ -41,6 +46,7 @@ class ResearchJobStore:
                     usage_json TEXT NOT NULL DEFAULT '{}', duration_seconds REAL NOT NULL DEFAULT 0,
                     iteration INTEGER NOT NULL DEFAULT 0, max_iterations INTEGER NOT NULL DEFAULT 6,
                     max_sources INTEGER NOT NULL DEFAULT 40, max_minutes INTEGER NOT NULL DEFAULT 20,
+                    mode TEXT NOT NULL DEFAULT 'standard', checkpoint_json TEXT NOT NULL DEFAULT '{}',
                     lease_until TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
                     started_at TEXT, completed_at TEXT
                 );
@@ -86,6 +92,10 @@ class ResearchJobStore:
                 db.execute("ALTER TABLE research_jobs ADD COLUMN usage_json TEXT NOT NULL DEFAULT '{}'")
             if "duration_seconds" not in columns:
                 db.execute("ALTER TABLE research_jobs ADD COLUMN duration_seconds REAL NOT NULL DEFAULT 0")
+            if "mode" not in columns:
+                db.execute("ALTER TABLE research_jobs ADD COLUMN mode TEXT NOT NULL DEFAULT 'standard'")
+            if "checkpoint_json" not in columns:
+                db.execute("ALTER TABLE research_jobs ADD COLUMN checkpoint_json TEXT NOT NULL DEFAULT '{}'")
             db.execute("CREATE INDEX IF NOT EXISTS idx_research_jobs_contact ON research_jobs(contact_id, created_at)")
 
     @contextmanager
@@ -94,17 +104,19 @@ class ResearchJobStore:
             with self._db:
                 yield self._db
 
-    def create(self, *, telegram_user_id: int, chat_id: int, request: str, progress_message_id: int | None, contact_id: str = "") -> dict:
+    def create(self, *, telegram_user_id: int, chat_id: int, request: str, progress_message_id: int | None,
+               contact_id: str = "", mode: str = "standard") -> dict:
         job_id = uuid.uuid4().hex[:10]
         now = _now()
+        mode = mode if mode in RESEARCH_MODES else "standard"
+        max_iterations, max_sources, max_minutes = RESEARCH_MODES[mode]
         with self._tx() as db:
             db.execute(
                 """INSERT INTO research_jobs (id, telegram_user_id, chat_id, progress_message_id, request, contact_id, status, stage,
-                   created_at, updated_at, max_iterations, max_sources, max_minutes)
-                   VALUES (?, ?, ?, ?, ?, ?, 'queued', 'В очереди', ?, ?, ?, ?, ?)""",
+                   created_at, updated_at, max_iterations, max_sources, max_minutes, mode)
+                   VALUES (?, ?, ?, ?, ?, ?, 'queued', 'В очереди', ?, ?, ?, ?, ?, ?)""",
                 (job_id, telegram_user_id, chat_id, progress_message_id, request, contact_id,
-                 now, now, int(os.getenv("DEEP_RESEARCH_MAX_ITERATIONS", "6")),
-                 int(os.getenv("DEEP_RESEARCH_MAX_SOURCES", "40")), int(os.getenv("DEEP_RESEARCH_MAX_MINUTES", "20"))),
+                 now, now, max_iterations, max_sources, max_minutes, mode),
             )
         return self.get(job_id) or {}
 
@@ -188,11 +200,14 @@ class ResearchJobStore:
     def update(self, job_id: str, *, status: str | None = None, stage: str | None = None,
                progress: int | None = None, detail: str | None = None, error: str | None = None,
                source_count: int | None = None, iteration: int | None = None, report: str | None = None,
-               google_url: str | None = None, usage: dict | None = None, duration_seconds: float | None = None, release_lease: bool = False) -> None:
+               google_url: str | None = None, usage: dict | None = None, duration_seconds: float | None = None,
+               checkpoint: dict | None = None, release_lease: bool = False) -> None:
         values: dict[str, object] = {"updated_at": _now()}
         for key, value in {"status": status, "stage": stage, "progress": progress, "detail": detail, "error": error,
                            "source_count": source_count, "iteration": iteration, "report": report, "google_url": google_url,
-                           "usage_json": json.dumps(usage, ensure_ascii=False) if usage is not None else None, "duration_seconds": duration_seconds}.items():
+                           "usage_json": json.dumps(usage, ensure_ascii=False) if usage is not None else None,
+                           "duration_seconds": duration_seconds,
+                           "checkpoint_json": json.dumps(checkpoint, ensure_ascii=False) if checkpoint is not None else None}.items():
             if value is not None:
                 values[key] = value
         if status in TERMINAL:
@@ -212,9 +227,22 @@ class ResearchJobStore:
 
     def refine(self, job_id: str, telegram_user_id: int, refinement: str) -> bool:
         with self._tx() as db:
-            result = db.execute("UPDATE research_jobs SET refinement=?, status='queued', stage='Уточнение поставлено в очередь', progress=0, detail='', error='', report='', google_url='', iteration=0, lease_until=NULL, updated_at=?, completed_at=NULL WHERE id=? AND telegram_user_id=? AND status IN ('completed','failed','cancelled','waiting_input')",
+            result = db.execute("UPDATE research_jobs SET refinement=?, status='queued', stage='Уточнение поставлено в очередь', progress=60, detail='Продолжу с сохранённого этапа.', error='', lease_until=NULL, updated_at=?, completed_at=NULL WHERE id=? AND telegram_user_id=? AND status IN ('completed','failed','cancelled','partial','waiting_input')",
                                 (refinement, _now(), job_id, telegram_user_id))
         return bool(result.rowcount)
+
+    def resume(self, job_id: str, telegram_user_id: int) -> bool:
+        with self._tx() as db:
+            result = db.execute("UPDATE research_jobs SET status='queued', stage='Продолжение поставлено в очередь', progress=60, detail='Использую сохранённые источники и черновик.', error='', lease_until=NULL, updated_at=?, completed_at=NULL WHERE id=? AND telegram_user_id=? AND status IN ('failed','partial','waiting_input') AND checkpoint_json != '{}'",
+                                (_now(), job_id, telegram_user_id))
+        return bool(result.rowcount)
+
+    def checkpoint(self, job_id: str) -> dict:
+        job = self.get(job_id) or {}
+        try:
+            return json.loads(str(job.get("checkpoint_json") or "{}"))
+        except json.JSONDecodeError:
+            return {}
 
     def is_cancelled(self, job_id: str) -> bool:
         job = self.get(job_id)

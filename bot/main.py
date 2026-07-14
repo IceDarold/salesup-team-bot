@@ -132,6 +132,8 @@ from bot.handlers import (  # noqa: E402
     research_callback,
     research_command,
     research_cancel_command,
+    research_resume_callback,
+    research_resume_command,
     research_document_handler,
     research_refine_command,
     research_proposal_callback,
@@ -204,6 +206,7 @@ COMMANDS = [
     BotCommand("company_research", "Глубоко изучить компанию"),
     BotCommand("research_status", "Статус глубокого research"),
     BotCommand("research_cancel", "Отменить глубокий research"),
+    BotCommand("research_resume", "Продолжить research с checkpoint"),
     BotCommand("research_report", "Открыть отчёт research"),
     BotCommand("research_refine", "Уточнить завершённый research"),
     BotCommand("outreach_stats", "Аналитика outreach"),
@@ -420,6 +423,7 @@ def main() -> None:
     app.add_handler(CommandHandler("company_research", member_required(company_research_command)))
     app.add_handler(CommandHandler("research_status", member_required(research_status_command)))
     app.add_handler(CommandHandler("research_cancel", member_required(research_cancel_command)))
+    app.add_handler(CommandHandler("research_resume", member_required(research_resume_command)))
     app.add_handler(CommandHandler("research_report", member_required(research_report_command)))
     app.add_handler(CommandHandler("research_refine", member_required(research_refine_command)))
     app.add_handler(CommandHandler("outreach_stats", member_required(outreach_stats_command)))
@@ -434,6 +438,7 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(member_required(telegram_archive_callback), pattern=r"^archive:"))
     app.add_handler(CallbackQueryHandler(member_required(contact_status_suggestion_callback), pattern=r"^status_suggestion:"))
     app.add_handler(CallbackQueryHandler(member_required(research_callback), pattern=r"^research:"))
+    app.add_handler(CallbackQueryHandler(member_required(research_resume_callback), pattern=r"^research_resume:"))
     app.add_handler(CallbackQueryHandler(member_required(research_contact_callback), pattern=r"^research_contact:"))
     app.add_handler(CallbackQueryHandler(member_required(research_proposal_callback), pattern=r"^research_proposal:"))
     app.add_handler(CallbackQueryHandler(member_required(scheduled_callback), pattern=r"^scheduled:"))
