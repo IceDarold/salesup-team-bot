@@ -430,6 +430,7 @@ def main() -> None:
     app.add_handler(CommandHandler("research_refine", member_required(research_refine_command)))
     app.add_handler(CommandHandler("outreach_stats", member_required(outreach_stats_command)))
     app.add_handler(CommandHandler("outreach_audit", member_required(outreach_audit_command)))
+    app.add_handler(CallbackQueryHandler(member_required(outreach_audit_callback), pattern=r"^outreach_audit:"))
     app.add_handler(CommandHandler("scheduled_messages", member_required(scheduled_messages_command)))
     app.add_handler(CommandHandler("add_member", admin_required(add_member_cmd)))
     app.add_handler(CommandHandler("members", admin_required(members_cmd)))
@@ -822,15 +823,64 @@ async def outreach_audit_job(context, *, telegram_user_id: int | None = None) ->
 
 
 async def outreach_audit_command(update, context) -> None:
-    """Run the same audit immediately, scoped to the requesting team member."""
-    message = await update.effective_message.reply_text("Проверяю research, историю Telegram и цепочки follow-up…")
+    """Show a non-mutating summary before the user asks for research cards."""
+    message = await update.effective_message.reply_text("Собираю сводку по outreach…")
     try:
-        await outreach_audit_job(context, telegram_user_id=update.effective_user.id)
+        member = next((item for item in await asyncio.to_thread(list_team_members)
+                       if str(item.get("telegram_user_id") or "") == str(update.effective_user.id)), None)
+        if not member:
+            await message.edit_text("Не нашёл вашу запись в Team Members.")
+            return
+        contacts = await asyncio.to_thread(find_contacts, member_page_id=member["id"], limit=1000)
+        service = getattr(context.application, "_telegram_user_service", None)
+        with_research = sum(bool(item.get("research_url")) for item in contacts)
+        missing_research = [item for item in contacts if not item.get("research_url") and item.get("research_status") != "Declined"]
+        replies = 0
+        if service:
+            for contact in contacts:
+                history = service.contact_messages(update.effective_user.id, str(contact["id"]), limit=60)
+                replies += int(any(not bool(item.get("outgoing")) for item in history))
     except Exception:
         logger.exception("Manual outreach audit failed for Telegram user %s", update.effective_user.id)
         await message.edit_text("Не удалось завершить аудит. Попробуй ещё раз чуть позже.")
         return
-    await message.edit_text("Аудит завершён. Если найдены проблемы, бот прислал предложения отдельными сообщениями.")
+    await message.edit_text(
+        "<b>Сводка outreach-аудита</b>\n\n"
+        f"Contacts: <b>{len(contacts)}</b>\n"
+        f"С готовым research: <b>{with_research}</b>\n"
+        f"Без research: <b>{len(missing_research)}</b>\n"
+        f"Есть входящий ответ в Telegram: <b>{replies}</b>\n\n"
+        "Карточки и исследования пока не запускал.",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔎 Показать карточки research", callback_data="outreach_audit:research")]]),
+    )
+
+
+async def outreach_audit_callback(update, context) -> None:
+    query = update.callback_query
+    await query.answer()
+    if query.data != "outreach_audit:research":
+        return
+    try:
+        member = next((item for item in await asyncio.to_thread(list_team_members)
+                       if str(item.get("telegram_user_id") or "") == str(update.effective_user.id)), None)
+        if not member:
+            await query.edit_message_text("Не нашёл вашу запись в Team Members.")
+            return
+        contacts = await asyncio.to_thread(find_contacts, member_page_id=member["id"], limit=1000)
+        store = ResearchJobStore()
+        excluded = {item.strip() for item in os.getenv("OUTREACH_RESEARCH_EXCLUDED_CONTACT_STATUSES", "Отказ,Клиент").split(",") if item.strip()}
+        offered = 0
+        for contact in contacts:
+            if contact.get("status") in excluded or contact.get("research_url"):
+                continue
+            before = store.has_suggestion(str(contact.get("id") or ""), update.effective_user.id)
+            await _offer_research(context, store, contact, update.effective_user.id)
+            offered += int(not before)
+        await query.edit_message_text(f"Готово: отправил {offered} новых карточек research. Остальные уже имеют research, активное предложение или не подходят по статусу.")
+    except Exception:
+        logger.exception("Could not show research cards after manual outreach summary")
+        await query.edit_message_text("Не удалось показать карточки research. Попробуй ещё раз позже.")
 
 
 async def conversation_archives_job(context) -> None:
