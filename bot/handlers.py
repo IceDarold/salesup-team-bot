@@ -615,7 +615,9 @@ async def research_proposal_callback(update: Update, context: ContextTypes.DEFAU
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("⚡ Обычный · до 12 минут / 12 источников", callback_data=f"research_proposal:start:{contact_id}")],
-                [InlineKeyboardButton("🔬 Глубокий · до 25 минут / 25 источников", callback_data=f"research_proposal:start_deep:{contact_id}")],
+                # Telegram limits callback_data to 64 bytes. A UUID contact id
+                # makes `start_deep` too long, so keep the action compact.
+                [InlineKeyboardButton("🔬 Глубокий · до 25 минут / 25 источников", callback_data=f"research_proposal:deep:{contact_id}")],
                 [InlineKeyboardButton("📎 Прикрепить готовый research", callback_data=f"research_proposal:attach:{contact_id}")],
                 [InlineKeyboardButton("← Назад", callback_data=f"research_proposal:back:{contact_id}")],
             ]),
@@ -648,9 +650,9 @@ async def research_proposal_callback(update: Update, context: ContextTypes.DEFAU
         # This action is handled by its ConversationHandler; keep the global
         # callback harmless when Telegram delivers a stale press.
         return
-    if action not in {"start", "start_deep"}:
+    if action not in {"start", "deep"}:
         return
-    mode = "deep" if action == "start_deep" else "standard"
+    mode = "deep" if action == "deep" else "standard"
     await asyncio.to_thread(RESEARCH_STORE.resolve_suggestion, contact_id, update.effective_user.id, "started")
     await asyncio.to_thread(update_contact_research_state, contact_id, "In progress")
     await query.edit_message_text("Создаю задачу глубокого исследования…")
