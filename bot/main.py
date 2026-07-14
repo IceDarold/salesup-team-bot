@@ -210,6 +210,7 @@ COMMANDS = [
     BotCommand("research_report", "Открыть отчёт research"),
     BotCommand("research_refine", "Уточнить завершённый research"),
     BotCommand("outreach_stats", "Аналитика outreach"),
+    BotCommand("outreach_audit", "Проверить outreach сейчас"),
     BotCommand("schedule_message", "Запланировать личное сообщение"),
     BotCommand("scheduled_messages", "Запланированные сообщения"),
     BotCommand("help", "Помощь"),
@@ -427,6 +428,7 @@ def main() -> None:
     app.add_handler(CommandHandler("research_report", member_required(research_report_command)))
     app.add_handler(CommandHandler("research_refine", member_required(research_refine_command)))
     app.add_handler(CommandHandler("outreach_stats", member_required(outreach_stats_command)))
+    app.add_handler(CommandHandler("outreach_audit", member_required(outreach_audit_command)))
     app.add_handler(CommandHandler("scheduled_messages", member_required(scheduled_messages_command)))
     app.add_handler(CommandHandler("add_member", admin_required(add_member_cmd)))
     app.add_handler(CommandHandler("members", admin_required(members_cmd)))
@@ -671,7 +673,7 @@ async def _reconcile_outbound_messages(contact: dict, member: dict, messages: li
     return known
 
 
-async def outreach_audit_job(context) -> None:
+async def outreach_audit_job(context, *, telegram_user_id: int | None = None) -> None:
     """Audit each contact once: research first, then reply safety, then follow-ups.
 
     Telegram synchronization remains a separate minute-level job. This slower audit
@@ -689,6 +691,8 @@ async def outreach_audit_job(context) -> None:
         try:
             user_id = int(member.get("telegram_user_id") or "")
         except (TypeError, ValueError):
+            continue
+        if telegram_user_id is not None and user_id != telegram_user_id:
             continue
         if not service.status(user_id).get("connected"):
             continue
@@ -762,6 +766,18 @@ async def outreach_audit_job(context) -> None:
                 await context.bot.send_message(chat_id=user_id, text=_followup_proposal_text(payload["contact_name"], payload), parse_mode="HTML", reply_markup=_followup_proposal_buttons(suggestion["token"]))
         except Exception:
             logger.exception("Unable to audit outreach for member %s", member.get("id"))
+
+
+async def outreach_audit_command(update, context) -> None:
+    """Run the same audit immediately, scoped to the requesting team member."""
+    message = await update.effective_message.reply_text("Проверяю research, историю Telegram и цепочки follow-up…")
+    try:
+        await outreach_audit_job(context, telegram_user_id=update.effective_user.id)
+    except Exception:
+        logger.exception("Manual outreach audit failed for Telegram user %s", update.effective_user.id)
+        await message.edit_text("Не удалось завершить аудит. Попробуй ещё раз чуть позже.")
+        return
+    await message.edit_text("Аудит завершён. Если найдены проблемы, бот прислал предложения отдельными сообщениями.")
 
 
 async def conversation_archives_job(context) -> None:
