@@ -594,7 +594,7 @@ async def _offer_research(context, store: ResearchJobStore, contact: dict, user_
     )
     await asyncio.to_thread(update_contact_research_state, contact_id, "Proposed")
     buttons = InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔎 Провести research", callback_data=f"research_proposal:start:{contact_id}")],
+        [InlineKeyboardButton("🔎 Провести research", callback_data=f"research_proposal:choose:{contact_id}")],
         [InlineKeyboardButton("📎 Прикрепить готовый research", callback_data=f"research_proposal:attach:{contact_id}")],
         [InlineKeyboardButton("Вернуться позже", callback_data=f"research_proposal:later:{contact_id}")],
         [InlineKeyboardButton("Не делать research", callback_data=f"research_proposal:skip:{contact_id}")],

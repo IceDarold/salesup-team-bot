@@ -608,6 +608,31 @@ async def research_proposal_callback(update: Update, context: ContextTypes.DEFAU
     if not contact:
         await query.edit_message_text("Контакт не найден или больше не принадлежит вам.")
         return
+    if action == "choose":
+        await query.edit_message_text(
+            f"<b>Research: {html.escape(str(contact.get('name') or 'контакт'))}</b>\n\n"
+            "Выбери глубину исследования. После завершения ссылка на отчёт появится в Contacts.",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("⚡ Обычный · до 12 минут / 12 источников", callback_data=f"research_proposal:start:{contact_id}")],
+                [InlineKeyboardButton("🔬 Глубокий · до 25 минут / 25 источников", callback_data=f"research_proposal:start_deep:{contact_id}")],
+                [InlineKeyboardButton("📎 Прикрепить готовый research", callback_data=f"research_proposal:attach:{contact_id}")],
+                [InlineKeyboardButton("← Назад", callback_data=f"research_proposal:back:{contact_id}")],
+            ]),
+        )
+        return
+    if action == "back":
+        await query.edit_message_text(
+            f"<b>Контакт без research: {html.escape(str(contact.get('name') or 'без имени'))}</b>\n\nЗапустить research?",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔎 Провести research", callback_data=f"research_proposal:choose:{contact_id}")],
+                [InlineKeyboardButton("📎 Прикрепить готовый research", callback_data=f"research_proposal:attach:{contact_id}")],
+                [InlineKeyboardButton("Вернуться позже", callback_data=f"research_proposal:later:{contact_id}")],
+                [InlineKeyboardButton("Не делать research", callback_data=f"research_proposal:skip:{contact_id}")],
+            ]),
+        )
+        return
     if action == "skip":
         await asyncio.to_thread(RESEARCH_STORE.resolve_suggestion, contact_id, update.effective_user.id, "skipped")
         await asyncio.to_thread(update_contact_research_state, contact_id, "Declined")
