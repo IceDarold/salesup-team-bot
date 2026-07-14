@@ -856,10 +856,87 @@ async def outreach_audit_command(update, context) -> None:
     )
 
 
+_OUTREACH_AUDIT_RESEARCH_KEY = "outreach_audit_research_contacts"
+_OUTREACH_AUDIT_RESEARCH_PAGE_SIZE = 4
+
+
+def _outreach_audit_research_label(contact: dict) -> str:
+    """Keep the two-column contact picker readable on small Telegram screens."""
+    name = str(contact.get("name") or "Без имени").strip()
+    company = str(contact.get("company") or "").strip()
+    label = f"{name} · {company}" if company else name
+    return label[:30]
+
+
+def _outreach_audit_research_keyboard(contacts: list[dict], page: int) -> InlineKeyboardMarkup:
+    total_pages = max(1, (len(contacts) + _OUTREACH_AUDIT_RESEARCH_PAGE_SIZE - 1) // _OUTREACH_AUDIT_RESEARCH_PAGE_SIZE)
+    page = max(0, min(page, total_pages - 1))
+    start = page * _OUTREACH_AUDIT_RESEARCH_PAGE_SIZE
+    current = contacts[start:start + _OUTREACH_AUDIT_RESEARCH_PAGE_SIZE]
+    rows = []
+    for offset in range(0, len(current), 2):
+        rows.append([
+            InlineKeyboardButton(
+                _outreach_audit_research_label(contact),
+                callback_data=f"outreach_audit:open:{start + index}",
+            )
+            for index, contact in enumerate(current[offset:offset + 2], start=offset)
+        ])
+
+    if page == 0 and total_pages > 1:
+        rows.append([InlineKeyboardButton("Далее →", callback_data="outreach_audit:page:1")])
+    elif page > 0:
+        navigation = [InlineKeyboardButton("←", callback_data=f"outreach_audit:page:{page - 1}")]
+        if page < total_pages - 1:
+            navigation.append(InlineKeyboardButton("→", callback_data=f"outreach_audit:page:{page + 1}"))
+        rows.append(navigation)
+    return InlineKeyboardMarkup(rows)
+
+
+async def _show_outreach_audit_research_page(query, context, page: int) -> None:
+    contacts = context.user_data.get(_OUTREACH_AUDIT_RESEARCH_KEY) or []
+    if not contacts:
+        await query.edit_message_text("Список карточек больше недоступен. Запусти /outreach_audit ещё раз.")
+        return
+    total_pages = (len(contacts) + _OUTREACH_AUDIT_RESEARCH_PAGE_SIZE - 1) // _OUTREACH_AUDIT_RESEARCH_PAGE_SIZE
+    page = max(0, min(page, total_pages - 1))
+    await query.edit_message_text(
+        f"<b>Карточки research</b> · {page + 1}/{total_pages}\n\n"
+        "Выбери контакт — бот пришлёт его карточку с вариантами действий.",
+        parse_mode="HTML",
+        reply_markup=_outreach_audit_research_keyboard(contacts, page),
+    )
+
+
 async def outreach_audit_callback(update, context) -> None:
     query = update.callback_query
     await query.answer()
-    if query.data != "outreach_audit:research":
+    data = query.data or ""
+    if data.startswith("outreach_audit:page:"):
+        try:
+            page = int(data.rsplit(":", 1)[1])
+        except ValueError:
+            await query.edit_message_text("Не удалось открыть страницу карточек. Запусти /outreach_audit ещё раз.")
+            return
+        await _show_outreach_audit_research_page(query, context, page)
+        return
+    if data.startswith("outreach_audit:open:"):
+        try:
+            index = int(data.rsplit(":", 1)[1])
+            contact = (context.user_data.get(_OUTREACH_AUDIT_RESEARCH_KEY) or [])[index]
+        except (IndexError, TypeError, ValueError):
+            await query.edit_message_text("Карточка больше недоступна. Запусти /outreach_audit ещё раз.")
+            return
+        try:
+            offered = await _offer_research(context, ResearchJobStore(), contact, update.effective_user.id)
+        except Exception:
+            logger.exception("Could not send selected research card")
+            await context.bot.send_message(chat_id=update.effective_user.id, text="Не удалось показать карточку. Попробуй ещё раз.")
+            return
+        if not offered:
+            await context.bot.send_message(chat_id=update.effective_user.id, text="Эта карточка уже не актуальна.")
+        return
+    if data != "outreach_audit:research":
         return
     try:
         member = next((item for item in await asyncio.to_thread(list_team_members)
@@ -870,14 +947,19 @@ async def outreach_audit_callback(update, context) -> None:
         contacts = await asyncio.to_thread(find_contacts, member_page_id=member["id"], limit=1000)
         store = ResearchJobStore()
         excluded = {item.strip() for item in os.getenv("OUTREACH_RESEARCH_EXCLUDED_CONTACT_STATUSES", "Отказ,Клиент").split(",") if item.strip()}
-        offered = 0
-        for contact in contacts:
-            if contact.get("status") in excluded or contact.get("research_url"):
-                continue
-            before = store.has_suggestion(str(contact.get("id") or ""), update.effective_user.id)
-            await _offer_research(context, store, contact, update.effective_user.id)
-            offered += int(not before)
-        await query.edit_message_text(f"Готово: отправил {offered} новых карточек research. Остальные уже имеют research, активное предложение или не подходят по статусу.")
+        suitable = [
+            contact for contact in contacts
+            if contact.get("status") not in excluded
+            and not contact.get("research_url")
+            and ((contact.get("research_status") or "Not started") == "Not started" or _research_revisit_due(contact))
+            and not store.has_active_for_contact(str(contact.get("id") or ""))
+            and not store.has_suggestion(str(contact.get("id") or ""), update.effective_user.id)
+        ]
+        if not suitable:
+            await query.edit_message_text("Нет новых карточек research: остальные уже исследованы, предложены или не подходят по статусу.")
+            return
+        context.user_data[_OUTREACH_AUDIT_RESEARCH_KEY] = suitable
+        await _show_outreach_audit_research_page(query, context, page=0)
     except Exception:
         logger.exception("Could not show research cards after manual outreach summary")
         await query.edit_message_text("Не удалось показать карточки research. Попробуй ещё раз позже.")
