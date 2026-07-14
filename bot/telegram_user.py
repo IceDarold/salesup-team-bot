@@ -184,7 +184,7 @@ class TelegramUserService:
     def contact_messages(self, telegram_user_id: int, contact_id: str, limit: int = 500) -> list[dict]:
         with self._lock:
             return [dict(row) for row in self._db.execute(
-                "SELECT sent_at, outgoing, text, media FROM telegram_archived_messages WHERE telegram_user_id = ? AND contact_id = ? ORDER BY sent_at DESC, message_id DESC LIMIT ?",
+                "SELECT message_id, sent_at, outgoing, text, media FROM telegram_archived_messages WHERE telegram_user_id = ? AND contact_id = ? ORDER BY sent_at DESC, message_id DESC LIMIT ?",
                 (telegram_user_id, contact_id, max(1, min(limit, 2000))),
             ).fetchall()][::-1]
 

@@ -1027,18 +1027,17 @@ async def scheduled_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await query.edit_message_text("Запланированное сообщение отменено.")
     elif action == "decline":
         service.decline_scheduled_message(token, user_id)
-        await _sync_scheduled_followup(item, status="Пропущено", stop_reason="Пользователь не подтвердил отправку")
+        await _sync_scheduled_followup(item, status="Не отправлять", stop_reason="Пользователь не подтвердил отправку")
         await _record_outreach_event(item, "followup_declined")
         await query.edit_message_text("Понял, это сообщение отправлено не будет.")
     elif action == "send":
         if not service.begin_scheduled_message_send(token, user_id):
             await query.edit_message_text("Это сообщение уже отправляется, отправлено или отменено.")
             return
-        await _sync_scheduled_followup(item, status="Отправляется")
         try:
             message_id = await service.send_message(user_id, str(item["recipient"]), str(item["text"]))
             service.mark_scheduled_message_sent(token, user_id, message_id)
-            await _sync_scheduled_followup(item, status="Отправлено", sent_at=datetime.now(timezone.utc))
+            await _sync_scheduled_followup(item, status="Отправлено", sent_at=datetime.now(timezone.utc), telegram_message_id=str(message_id))
             await _record_outreach_event(item, "followup_sent", {"recipient": item.get("recipient", "")})
         except Exception as exc:
             logger.exception("Unable to send scheduled message %s", token)
@@ -1088,7 +1087,8 @@ async def scheduled_edit_value(update: Update, context: ContextTypes.DEFAULT_TYP
 
 
 async def _sync_scheduled_followup(item: dict, *, status: str | None = None, sent_at: datetime | None = None,
-                                   stop_reason: str | None = None, error: str | None = None) -> None:
+                                   stop_reason: str | None = None, error: str | None = None,
+                                   telegram_message_id: str | None = None) -> None:
     """Best-effort mirror for Follow-ups rows. Manual schedules have no Notion id."""
     followup_id = str(item.get("notion_followup_id") or "")
     if not followup_id:
@@ -1098,7 +1098,7 @@ async def _sync_scheduled_followup(item: dict, *, status: str | None = None, sen
         await asyncio.to_thread(
             update_followup, followup_id=followup_id, status=status, scheduled_at=scheduled_at,
             text=str(item.get("text") or ""), recipient=str(item.get("recipient") or ""),
-            sent_at=sent_at, stop_reason=stop_reason, error=error,
+            sent_at=sent_at, stop_reason=stop_reason, error=error, telegram_message_id=telegram_message_id,
         )
     except Exception:
         logger.exception("Unable to synchronize Follow-up %s", followup_id)

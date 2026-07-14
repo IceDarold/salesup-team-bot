@@ -44,7 +44,7 @@ load_dotenv()
 from bot.access import admin_required, init_access_db, member_required  # noqa: E402
 from bot.telegram_user import TelegramUserService  # noqa: E402
 from bot.telegram_web import TelegramTwoFactorServer  # noqa: E402
-from notion_store import find_contacts, get_contacts_with_next_step_on, list_team_members, list_followups_for_contacts, stop_contact_followups, update_contact_research_state, update_followup  # noqa: E402
+from notion_store import create_followup, find_contacts, get_contacts_with_next_step_on, list_team_members, list_followups_for_contacts, stop_contact_followups, update_contact_research_state, update_followup  # noqa: E402
 from followups import FollowupSuggestionStore, generate_adaptive_followup, generate_followup_sequence  # noqa: E402
 from notion_store import get_contact_status_options  # noqa: E402
 from insights import analyze_contact_status  # noqa: E402
@@ -577,7 +577,7 @@ async def scheduled_messages_job(context) -> None:
         try:
             item = await _refresh_due_followup(item, service)
             if item.get("notion_followup_id"):
-                await asyncio.to_thread(update_followup, followup_id=str(item["notion_followup_id"]), status="Ждёт подтверждения отправки", text=str(item.get("text") or ""))
+                await asyncio.to_thread(update_followup, followup_id=str(item["notion_followup_id"]), status="Ожидает подтверждения", text=str(item.get("text") or ""))
             when = datetime.fromisoformat(str(item["scheduled_at"])).astimezone(ZoneInfo(os.getenv("SCHEDULED_MESSAGES_TIMEZONE", "Europe/Moscow")))
             text = (
                 f"<b>Время отправки пришло</b>\n\n"
@@ -637,6 +637,40 @@ def _new_enough_contact(contact: dict) -> bool:
     return created >= datetime.now(created.tzinfo) - timedelta(days=days)
 
 
+async def _reconcile_outbound_messages(contact: dict, member: dict, messages: list[dict], known: list[dict]) -> list[dict]:
+    """Mirror already-sent Telegram outreach in Notion exactly once.
+
+    The Telegram message ID is the durable idempotency key. Only outbound messages
+    are put in Outreach messages: this table models our communication sequence,
+    while the complete two-sided transcript remains in its Google Doc.
+    """
+    known_ids = {str(item.get("telegram_message_id") or "") for item in known}
+    outgoing = [item for item in messages if bool(item.get("outgoing"))]
+    for index, message in enumerate(outgoing):
+        message_id = str(message.get("message_id") or "")
+        if not message_id or message_id in known_ids:
+            continue
+        raw_sent_at = str(message.get("sent_at") or "")
+        try:
+            sent_at = datetime.fromisoformat(raw_sent_at.replace("Z", "+00:00"))
+        except ValueError:
+            logger.warning("Skipping archived message %s with invalid date %r", message_id, raw_sent_at)
+            continue
+        text = str(message.get("text") or message.get("media") or "").strip()
+        if not text:
+            continue
+        row = await asyncio.to_thread(
+            create_followup,
+            contact_id=str(contact["id"]), owner_id=str(member["id"]),
+            recipient=_followup_recipient(contact), text=text, scheduled_at=None,
+            sequence=index, source="Telegram reconciliation", status="Отправлено",
+            sent_at=sent_at, telegram_message_id=message_id,
+        )
+        known.append(row)
+        known_ids.add(message_id)
+    return known
+
+
 async def outreach_audit_job(context) -> None:
     """Audit each contact once: research first, then reply safety, then follow-ups.
 
@@ -663,11 +697,13 @@ async def outreach_audit_job(context) -> None:
             existing = await asyncio.to_thread(list_followups_for_contacts, [str(item["id"]) for item in contacts]) if os.getenv("NOTION_FOLLOW_UPS_DB_ID") else {}
             for contact in contacts:
                 contact_id = str(contact["id"])
-                active = [item for item in existing.get(contact_id, []) if item.get("status") in {"Черновик", "На согласовании", "Запланировано", "Ждёт подтверждения отправки", "Отправляется"}]
 
                 # A reply is always authoritative, even if the minute sync was
                 # temporarily unavailable. Never prepare another touch over it.
                 history = service.contact_messages(user_id, contact_id, limit=60)
+                if os.getenv("NOTION_FOLLOW_UPS_DB_ID"):
+                    existing[contact_id] = await _reconcile_outbound_messages(contact, member, history, existing.get(contact_id, []))
+                active = [item for item in existing.get(contact_id, []) if item.get("status") in {"Черновик", "На согласовании", "Запланировано", "Ожидает подтверждения"}]
                 if any(not bool(item.get("outgoing")) for item in history):
                     if active:
                         await asyncio.to_thread(stop_contact_followups, contact_id, "Получен ответ контакта")

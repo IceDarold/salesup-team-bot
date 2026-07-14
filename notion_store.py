@@ -21,7 +21,10 @@ CONTACT_RESEARCH_PROPERTY = "Research компании"
 CONTACT_RESEARCH_STATUS_PROPERTY = "Research status"
 CONTACT_RESEARCH_REVISIT_PROPERTY = "Research revisit at"
 FOLLOW_UPS_DB_ID_ENV = "NOTION_FOLLOW_UPS_DB_ID"
-FOLLOW_UPS_ACTIVE_STATUSES = {"Черновик", "На согласовании", "Запланировано", "Ждёт подтверждения отправки", "Отправляется"}
+OUTREACH_MESSAGE_ACTIVE_STATUSES = {"Черновик", "На согласовании", "Запланировано", "Ожидает подтверждения"}
+# Backwards-compatible name used by the bot while the former Follow-ups table is
+# now named Outreach messages.
+FOLLOW_UPS_ACTIVE_STATUSES = OUTREACH_MESSAGE_ACTIVE_STATUSES
 NOTION_MAX_RETRIES = int(os.getenv("NOTION_MAX_RETRIES", "3"))
 NOTION_RETRY_BACKOFF_SECONDS = float(os.getenv("NOTION_RETRY_BACKOFF_SECONDS", "1.5"))
 STATS_TIMEZONE = os.getenv("STATS_TIMEZONE", "Asia/Nicosia")
@@ -282,20 +285,26 @@ def list_followups_for_contacts(contact_ids: list[str]) -> dict[str, list[dict]]
     return grouped
 
 
-def create_followup(*, contact_id: str, owner_id: str, recipient: str, text: str, scheduled_at: datetime, sequence: int, source: str = "AI follow-up") -> dict:
+def _message_type(sequence: int) -> str:
+    return {0: "Первое сообщение", 1: "Follow-up 1", 2: "Follow-up 2"}.get(sequence, "Финальное касание")
+
+
+def create_followup(*, contact_id: str, owner_id: str, recipient: str, text: str, scheduled_at: datetime | None,
+                    sequence: int, source: str = "AI proposal", status: str = "Запланировано",
+                    sent_at: datetime | None = None, telegram_message_id: str = "") -> dict:
+    """Create an Outreach messages row (the legacy function name is retained)."""
     client = _NotionClient()
     properties = {
-        "Название": _title(f"Follow-up #{sequence} — {recipient}"),
+        "Сообщение": _title(f"{_message_type(sequence)} — {recipient}"),
         "Контакт": _relation(contact_id),
-        "Ответственный": _relation(owner_id),
-        "Канал": {"select": {"name": "Telegram"}},
-        "Получатель": _rich_text(recipient),
-        "Текст сообщения": _rich_text(text),
-        "Запланировано на": {"date": {"start": scheduled_at.isoformat()}},
-        "Статус": {"status": {"name": "Запланировано"}},
-        "№ касания": {"number": sequence},
+        "Автор": _relation(owner_id),
+        "Текст": _rich_text(text),
+        "Запланировано на": {"date": {"start": scheduled_at.isoformat()}} if scheduled_at else None,
+        "Отправлено в": {"date": {"start": sent_at.isoformat()}} if sent_at else None,
+        "Telegram message ID": _rich_text(telegram_message_id),
+        "Статус": {"select": {"name": status}},
+        "Тип сообщения": {"select": {"name": _message_type(sequence)}},
         "Источник": {"select": {"name": source}},
-        "Создано ботом": {"checkbox": True},
     }
     page = client.create_page(_followups_db_id(), properties)
     return _followup_from_page(page)
@@ -303,16 +312,15 @@ def create_followup(*, contact_id: str, owner_id: str, recipient: str, text: str
 
 def update_followup(*, followup_id: str, status: str | None = None, scheduled_at: datetime | None = None,
                     text: str | None = None, recipient: str | None = None, telegram_schedule_id: str | None = None,
-                    sent_at: datetime | None = None, error: str | None = None, stop_reason: str | None = None) -> None:
+                    sent_at: datetime | None = None, error: str | None = None, stop_reason: str | None = None,
+                    telegram_message_id: str | None = None) -> None:
     properties = {
-        "Статус": {"status": {"name": status}} if status else None,
+        "Статус": {"select": {"name": status}} if status else None,
         "Запланировано на": {"date": {"start": scheduled_at.isoformat()}} if scheduled_at else None,
-        "Текст сообщения": _rich_text(text) if text is not None else None,
-        "Получатель": _rich_text(recipient) if recipient is not None else None,
-        "Telegram Schedule ID": _rich_text(telegram_schedule_id) if telegram_schedule_id is not None else None,
+        "Текст": _rich_text(text) if text is not None else None,
+        "Telegram message ID": _rich_text(telegram_message_id) if telegram_message_id is not None else None,
         "Отправлено в": {"date": {"start": sent_at.isoformat()}} if sent_at else None,
-        "Ошибка": _rich_text(error) if error is not None else None,
-        "Причина остановки": _rich_text(stop_reason) if stop_reason is not None else None,
+        "Причина отмены": _rich_text(stop_reason or error) if (stop_reason is not None or error is not None) else None,
     }
     _NotionClient().update_page(followup_id, properties)
 
@@ -322,7 +330,7 @@ def stop_contact_followups(contact_id: str, reason: str) -> list[str]:
     for item in list_followups_for_contacts([contact_id]).get(contact_id, []):
         if item.get("status") not in FOLLOW_UPS_ACTIVE_STATUSES:
             continue
-        update_followup(followup_id=item["id"], status="Неактуально", stop_reason=reason)
+        update_followup(followup_id=item["id"], status="Отменено", stop_reason=reason)
         stopped.append(item["id"])
     return stopped
 
@@ -1085,10 +1093,11 @@ def _followup_from_page(page: dict) -> dict:
     props = page.get("properties", {})
     return {
         "id": page.get("id", ""), "contact_ids": _prop_relation(props.get("Контакт")),
-        "owner_ids": _prop_relation(props.get("Ответственный")), "recipient": _prop_text(props.get("Получатель")),
-        "text": _prop_text(props.get("Текст сообщения")), "scheduled_at": _prop_date(props.get("Запланировано на")),
-        "status": _prop_status(props.get("Статус")), "sequence": _prop_number(props.get("№ касания")),
-        "telegram_schedule_id": _prop_text(props.get("Telegram Schedule ID")),
+        "owner_ids": _prop_relation(props.get("Автор")),
+        "text": _prop_text(props.get("Текст")), "scheduled_at": _prop_date(props.get("Запланировано на")),
+        "sent_at": _prop_date(props.get("Отправлено в")),
+        "status": _prop_select(props.get("Статус")), "message_type": _prop_select(props.get("Тип сообщения")),
+        "telegram_message_id": _prop_text(props.get("Telegram message ID")),
     }
 
 
