@@ -450,8 +450,7 @@ def main() -> None:
     schedule_next_step_reminders(app)
     schedule_conversation_archives(app)
     schedule_scheduled_messages(app)
-    schedule_followup_suggestions(app)
-    schedule_research_suggestions(app)
+    schedule_outreach_audit(app)
 
     logger.info("Interview bot starting")
     app.run_polling()
@@ -517,59 +516,55 @@ def schedule_scheduled_messages(app: Application) -> None:
     app.job_queue.run_repeating(scheduled_messages_job, interval=interval, first=10, name="scheduled_messages")
 
 
-def schedule_followup_suggestions(app: Application) -> None:
-    interval = max(900, int(os.getenv("FOLLOWUP_SCAN_SECONDS", "3600")))
-    app.job_queue.run_repeating(followup_suggestions_job, interval=interval, first=45, name="followup_suggestions")
+def schedule_outreach_audit(app: Application) -> None:
+    """One ordered audit replaces independent research and follow-up scans."""
+    legacy = os.getenv("FOLLOWUP_SCAN_SECONDS", os.getenv("OUTREACH_RESEARCH_SCAN_SECONDS", "3600"))
+    interval = max(900, int(os.getenv("OUTREACH_AUDIT_SECONDS", legacy)))
+    app.job_queue.run_repeating(outreach_audit_job, interval=interval, first=45, name="outreach_audit")
 
 
-def schedule_research_suggestions(app: Application) -> None:
-    interval = max(900, int(os.getenv("OUTREACH_RESEARCH_SCAN_SECONDS", "3600")))
-    app.job_queue.run_repeating(research_suggestions_job, interval=interval, first=60, name="research_suggestions")
+def _research_revisit_due(contact: dict) -> bool:
+    if (contact.get("research_status") or "Not started") != "Later":
+        return False
+    raw = str(contact.get("research_revisit_at") or "")
+    if not raw:
+        return False
+    try:
+        return datetime.fromisoformat(raw.replace("Z", "+00:00")) <= datetime.now(timezone.utc)
+    except ValueError:
+        return False
 
 
-async def research_suggestions_job(context) -> None:
-    """Offer company research for new, untouched Contacts without a research URL."""
-    statuses = {item.strip() for item in os.getenv("OUTREACH_RESEARCH_CONTACT_STATUSES", "Новый").split(",") if item.strip()}
-    store = ResearchJobStore()
-    for member in await asyncio.to_thread(list_team_members):
-        try:
-            user_id = int(member.get("telegram_user_id") or "")
-        except (ValueError, TypeError):
-            continue
-        try:
-            contacts = await asyncio.to_thread(find_contacts, member_page_id=member.get("id"), limit=1000)
-            for contact in contacts:
-                contact_id = str(contact.get("id") or "")
-                research_status = contact.get("research_status") or "Not started"
-                revisit_raw = str(contact.get("research_revisit_at") or "")
-                revisit_due = False
-                if research_status == "Later" and revisit_raw:
-                    try:
-                        revisit_due = datetime.fromisoformat(revisit_raw.replace("Z", "+00:00")) <= datetime.now(timezone.utc)
-                    except ValueError:
-                        revisit_due = False
-                eligible = research_status == "Not started" or revisit_due
-                if not contact_id or contact.get("research_url") or not eligible or store.has_active_for_contact(contact_id):
-                    continue
-                if research_status == "Later" and revisit_due:
-                    await asyncio.to_thread(update_contact_research_state, contact_id, "Not started")
-                if store.has_suggestion(contact_id, user_id) and research_status != "Later":
-                    continue
-                if not await asyncio.to_thread(store.create_suggestion, contact_id, user_id):
-                    # A previous decision exists; reset only when the scheduled
-                    # "later" date has arrived.
-                    if not revisit_due:
-                        continue
-                text = (
-                    f"<b>Контакт без research: {html.escape(str(contact.get('name') or 'без имени'))}</b>\n\n"
-                    "Для качественного outreach сначала стоит провести research компании: проверить ICP, триггер, процесс, "
-                    "гипотезы и подходящего ЛПР. Запустить?"
-                )
-                await asyncio.to_thread(update_contact_research_state, contact_id, "Proposed")
-                buttons = InlineKeyboardMarkup([[InlineKeyboardButton("🔎 Провести research", callback_data=f"research_proposal:start:{contact_id}")], [InlineKeyboardButton("📎 Прикрепить готовый research", callback_data=f"research_proposal:attach:{contact_id}")], [InlineKeyboardButton("Вернуться позже", callback_data=f"research_proposal:later:{contact_id}")], [InlineKeyboardButton("Не делать research", callback_data=f"research_proposal:skip:{contact_id}")]])
-                await context.bot.send_message(chat_id=user_id, text=text, parse_mode="HTML", reply_markup=buttons)
-        except Exception:
-            logger.exception("Unable to propose company research for member %s", member.get("id"))
+async def _offer_research(context, store: ResearchJobStore, contact: dict, user_id: int) -> bool:
+    """Offer research when appropriate; return whether missing research blocks outreach."""
+    contact_id = str(contact.get("id") or "")
+    research_status = contact.get("research_status") or "Not started"
+    revisit_due = _research_revisit_due(contact)
+    eligible = research_status == "Not started" or revisit_due
+    if not contact_id or contact.get("research_url"):
+        return False
+    if not eligible or store.has_active_for_contact(contact_id):
+        return True
+    if research_status == "Later" and revisit_due:
+        await asyncio.to_thread(update_contact_research_state, contact_id, "Not started")
+    if store.has_suggestion(contact_id, user_id) and not revisit_due:
+        return True
+    if not await asyncio.to_thread(store.create_suggestion, contact_id, user_id) and not revisit_due:
+        return True
+    text = (
+        f"<b>Контакт без research: {html.escape(str(contact.get('name') or 'без имени'))}</b>\n\n"
+        "Для качественного outreach сначала стоит провести research компании: проверить ICP, триггер, процесс, "
+        "гипотезы и подходящего ЛПР. Запустить?"
+    )
+    await asyncio.to_thread(update_contact_research_state, contact_id, "Proposed")
+    buttons = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔎 Провести research", callback_data=f"research_proposal:start:{contact_id}")],
+        [InlineKeyboardButton("📎 Прикрепить готовый research", callback_data=f"research_proposal:attach:{contact_id}")],
+        [InlineKeyboardButton("Вернуться позже", callback_data=f"research_proposal:later:{contact_id}")],
+        [InlineKeyboardButton("Не делать research", callback_data=f"research_proposal:skip:{contact_id}")],
+    ])
+    await context.bot.send_message(chat_id=user_id, text=text, parse_mode="HTML", reply_markup=buttons)
+    return True
 
 
 async def scheduled_messages_job(context) -> None:
@@ -642,13 +637,20 @@ def _new_enough_contact(contact: dict) -> bool:
     return created >= datetime.now(created.tzinfo) - timedelta(days=days)
 
 
-async def followup_suggestions_job(context) -> None:
-    """Propose a three-touch sequence for fresh Contacts that have no active follow-ups."""
+async def outreach_audit_job(context) -> None:
+    """Audit each contact once: research first, then reply safety, then follow-ups.
+
+    Telegram synchronization remains a separate minute-level job. This slower audit
+    owns every *proposal* so two schedulers cannot race and notify about the same
+    contact independently.
+    """
     service = getattr(context.application, "_telegram_user_service", None)
-    if service is None or not os.getenv("NOTION_FOLLOW_UPS_DB_ID"):
+    if service is None:
         return
-    store = FollowupSuggestionStore()
+    followup_store = FollowupSuggestionStore()
+    research_store = ResearchJobStore()
     eligible = {item.strip() for item in os.getenv("FOLLOWUP_CONTACT_STATUSES", "Новый,Написали,No response").split(",") if item.strip()}
+    research_excluded = {item.strip() for item in os.getenv("OUTREACH_RESEARCH_EXCLUDED_CONTACT_STATUSES", "Отказ,Клиент").split(",") if item.strip()}
     for member in await asyncio.to_thread(list_team_members):
         try:
             user_id = int(member.get("telegram_user_id") or "")
@@ -658,10 +660,28 @@ async def followup_suggestions_job(context) -> None:
             continue
         try:
             contacts = await asyncio.to_thread(find_contacts, member_page_id=member["id"], limit=1000)
-            existing = await asyncio.to_thread(list_followups_for_contacts, [str(item["id"]) for item in contacts])
+            existing = await asyncio.to_thread(list_followups_for_contacts, [str(item["id"]) for item in contacts]) if os.getenv("NOTION_FOLLOW_UPS_DB_ID") else {}
             for contact in contacts:
                 contact_id = str(contact["id"])
                 active = [item for item in existing.get(contact_id, []) if item.get("status") in {"Черновик", "На согласовании", "Запланировано", "Ждёт подтверждения отправки", "Отправляется"}]
+
+                # A reply is always authoritative, even if the minute sync was
+                # temporarily unavailable. Never prepare another touch over it.
+                history = service.contact_messages(user_id, contact_id, limit=60)
+                if any(not bool(item.get("outgoing")) for item in history):
+                    if active:
+                        await asyncio.to_thread(stop_contact_followups, contact_id, "Получен ответ контакта")
+                        await asyncio.to_thread(service.cancel_scheduled_messages_for_contact, user_id, contact_id)
+                    continue
+
+                # A research proposal precedes every outreach proposal. This is
+                # intentionally independent from a Contact's "Новый" status: a
+                # contact already in work can still receive a missing research.
+                if contact.get("status") not in research_excluded:
+                    research_missing = await _offer_research(context, research_store, contact, user_id)
+                    if research_missing:
+                        continue
+
                 if contact.get("status") not in eligible:
                     if active:
                         await asyncio.to_thread(stop_contact_followups, contact_id, "Статус контакта больше не требует follow-up")
@@ -674,14 +694,11 @@ async def followup_suggestions_job(context) -> None:
                 if active or not _new_enough_contact(contact) or not contact.get("research_url"):
                     continue
                 recipient = _followup_recipient(contact)
-                if not recipient or store.has_suggestion(contact_id, user_id):
+                if not recipient or followup_store.has_suggestion(contact_id, user_id):
                     continue
-                history = service.contact_messages(user_id, contact_id, limit=60)
                 # Do not restart an outreach sequence after a reply, and do not
                 # label a first contact as a follow-up. Research worker proposes
                 # the first message; this flow starts only after it was sent.
-                if any(not bool(item.get("outgoing")) for item in history):
-                    continue
                 if not any(bool(item.get("outgoing")) for item in history):
                     continue
                 try:
@@ -702,13 +719,13 @@ async def followup_suggestions_job(context) -> None:
                             logger.exception("Unable to notify about follow-up generation failure")
                     continue
                 payload.update({"recipient": recipient, "contact_name": contact.get("name") or ""})
-                suggestion = store.create(contact_id, str(member["id"]), user_id, payload)
+                suggestion = followup_store.create(contact_id, str(member["id"]), user_id, payload)
                 if not suggestion:
                     continue
                 from bot.handlers import _followup_proposal_buttons, _followup_proposal_text
                 await context.bot.send_message(chat_id=user_id, text=_followup_proposal_text(payload["contact_name"], payload), parse_mode="HTML", reply_markup=_followup_proposal_buttons(suggestion["token"]))
         except Exception:
-            logger.exception("Unable to prepare follow-up suggestions for member %s", member.get("id"))
+            logger.exception("Unable to audit outreach for member %s", member.get("id"))
 
 
 async def conversation_archives_job(context) -> None:
