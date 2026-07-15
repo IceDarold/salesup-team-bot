@@ -574,12 +574,12 @@ def _research_revisit_due(contact: dict) -> bool:
         return False
 
 
-async def _offer_research(context, store: ResearchJobStore, contact: dict, user_id: int) -> bool:
+async def _offer_research(context, store: ResearchJobStore, contact: dict, user_id: int, *, force: bool = False) -> bool:
     """Offer research when appropriate; return whether missing research blocks outreach."""
     contact_id = str(contact.get("id") or "")
     research_status = contact.get("research_status") or "Not started"
     revisit_due = _research_revisit_due(contact)
-    eligible = research_status == "Not started" or revisit_due
+    eligible = force or research_status == "Not started" or revisit_due
     if not contact_id or contact.get("research_url"):
         return False
     if not eligible or store.has_active_for_contact(contact_id):
@@ -751,6 +751,7 @@ async def outreach_audit_job(context, *, telegram_user_id: int | None = None) ->
         try:
             contacts = await asyncio.to_thread(find_contacts, member_page_id=member["id"], limit=1000)
             existing = await asyncio.to_thread(list_followups_for_contacts, [str(item["id"]) for item in contacts]) if os.getenv("NOTION_FOLLOW_UPS_DB_ID") else {}
+            summary = {"total": len(contacts), "without_research": 0, "with_reply": 0, "missing_followups": 0}
             for contact in contacts:
                 contact_id = str(contact["id"])
 
@@ -761,6 +762,7 @@ async def outreach_audit_job(context, *, telegram_user_id: int | None = None) ->
                     existing[contact_id] = await _reconcile_outbound_messages(contact, member, history, existing.get(contact_id, []))
                 active = [item for item in existing.get(contact_id, []) if item.get("status") in {"Черновик", "На согласовании", "Запланировано", "Ожидает подтверждения"}]
                 if any(not bool(item.get("outgoing")) for item in history):
+                    summary["with_reply"] += 1
                     await _invalidate_followup_proposals(context, contact_id, user_id)
                     if active:
                         await asyncio.to_thread(stop_contact_followups, contact_id, "Получен ответ контакта")
@@ -771,8 +773,8 @@ async def outreach_audit_job(context, *, telegram_user_id: int | None = None) ->
                 # intentionally independent from a Contact's "Новый" status: a
                 # contact already in work can still receive a missing research.
                 if contact.get("status") not in research_excluded:
-                    research_missing = await _offer_research(context, research_store, contact, user_id)
-                    if research_missing:
+                    if not contact.get("research_url"):
+                        summary["without_research"] += 1
                         continue
 
                 if contact.get("status") not in eligible:
@@ -794,6 +796,11 @@ async def outreach_audit_job(context, *, telegram_user_id: int | None = None) ->
                 # the first message; this flow starts only after it was sent.
                 if not any(bool(item.get("outgoing")) for item in history):
                     continue
+                summary["missing_followups"] += 1
+                # Automatic audit only reports the issue. Generating texts and
+                # sending individual cards remains an explicit user action.
+                continue
+                # Kept below for the manual proposal flow implementation.
                 try:
                     research_job = await asyncio.to_thread(ResearchJobStore().latest_for_contact, contact_id)
                     research = json.loads(str(research_job.get("report") or "{}")) if research_job else {}
@@ -818,6 +825,22 @@ async def outreach_audit_job(context, *, telegram_user_id: int | None = None) ->
                 from bot.handlers import _followup_proposal_buttons, _followup_proposal_text
                 message = await context.bot.send_message(chat_id=user_id, text=_followup_proposal_text(payload["contact_name"], payload), parse_mode="HTML", reply_markup=_followup_proposal_buttons(suggestion["token"]))
                 await asyncio.to_thread(followup_store.set_message_id, suggestion["token"], user_id, message.message_id)
+            fingerprint = tuple(summary.values())
+            last = getattr(context.application, "_outreach_audit_summaries", {})
+            if last.get(user_id) != fingerprint:
+                last[user_id] = fingerprint
+                context.application._outreach_audit_summaries = last
+                await context.bot.send_message(
+                    chat_id=user_id,
+                    text=("<b>Сводка outreach-аудита</b>\n\n"
+                          f"Contacts: <b>{summary['total']}</b>\n"
+                          f"Без research: <b>{summary['without_research']}</b>\n"
+                          f"С входящим ответом: <b>{summary['with_reply']}</b>\n"
+                          f"Без активной цепочки follow-up: <b>{summary['missing_followups']}</b>\n\n"
+                          "Карточки не показывал."),
+                    parse_mode="HTML",
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔎 Показать карточки research", callback_data="outreach_audit:research")]]),
+                )
         except Exception:
             logger.exception("Unable to audit outreach for member %s", member.get("id"))
 
