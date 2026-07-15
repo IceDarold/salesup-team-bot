@@ -455,7 +455,7 @@ def main() -> None:
     schedule_next_step_reminders(app)
     schedule_conversation_archives(app)
     schedule_scheduled_messages(app)
-    schedule_outreach_audit(app)
+    schedule_outreach_proposal_expiry(app)
 
     logger.info("Interview bot starting")
     app.run_polling()
@@ -521,11 +521,13 @@ def schedule_scheduled_messages(app: Application) -> None:
     app.job_queue.run_repeating(scheduled_messages_job, interval=interval, first=10, name="scheduled_messages")
 
 
-def schedule_outreach_audit(app: Application) -> None:
-    """One ordered audit replaces independent research and follow-up scans."""
-    # The same job runs each minute to expire proposals on time. It performs the
-    # expensive Notion/Telegram scan only once per OUTREACH_AUDIT_SECONDS.
-    app.job_queue.run_repeating(outreach_audit_job, interval=60, first=45, name="outreach_audit")
+def schedule_outreach_proposal_expiry(app: Application) -> None:
+    """Keep only TTL cleanup in the background; outreach audits are manual."""
+    app.job_queue.run_repeating(outreach_proposal_expiry_job, interval=60, first=45, name="outreach_proposal_expiry")
+
+
+async def outreach_proposal_expiry_job(context) -> None:
+    await _expire_outreach_proposals(context)
 
 
 async def _expire_outreach_proposals(context) -> None:
